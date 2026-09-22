@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>照片追溯上传</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --line:#262b36; --txt:#e8ecf3; --sub:#8b93a5; --ok:#22c55e; --bad:#ef4444; --brand:#3b82f6; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin:0; padding:0; background:var(--bg); color:var(--txt);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  body { padding: 16px 14px calc(24px + env(safe-area-inset-bottom)); }
+  h1 { font-size: 19px; margin: 4px 0 2px; }
+  .sub { color: var(--sub); font-size: 12.5px; margin-bottom: 14px; }
+  .card { background: var(--card); border:1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+  label { display:block; font-size: 12.5px; color: var(--sub); margin-bottom: 6px; }
+  input[type=text] { width:100%; padding: 11px 12px; font-size: 15px; color: var(--txt);
+    background:#0c0e13; border:1px solid var(--line); border-radius: 9px; outline:none; }
+  input[type=text]:focus { border-color: var(--brand); }
+  .row { display:flex; gap:8px; margin-top:10px; flex-wrap: wrap; }
+  button { flex:1; min-width: 92px; padding: 11px 10px; font-size: 14px; border-radius: 9px;
+    border:1px solid var(--line); background:#202632; color: var(--txt); }
+  button:active { opacity:.75; }
+  button.primary { background: var(--brand); border-color: var(--brand); font-size: 16px; padding: 14px; font-weight: 600; }
+  button.ghost { background: transparent; }
+  #status { margin-top: 12px; font-size: 13px; line-height: 1.6; color: var(--sub); min-height: 20px; }
+  #status.ok { color: var(--ok); } #status.bad { color: var(--bad); }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+  .chip { font-size:12px; padding:6px 10px; border-radius: 999px; background:#0c0e13; border:1px solid var(--line); color:var(--sub); }
+  .chip.on { border-color: var(--brand); color: var(--txt); }
+  /* 识别中遮罩 */
+  #scanui { display:none; position: fixed; inset: 0; z-index: 9; background: rgba(0,0,0,.72);
+    align-items:center; justify-content:center; flex-direction:column; gap:14px; }
+  body.scanning #scanui { display: flex; }
+  #scanui .spin { width:38px; height:38px; border:4px solid rgba(255,255,255,.25);
+    border-top-color:#fff; border-radius:50%; animation: sp 0.9s linear infinite; }
+  #scanui .msg { color:#fff; font-size:15px; text-align:center; padding:0 24px; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <h1>照片追溯上传</h1>
+  <div class="sub">原生相机拍照 + 本地解码（zxing）· NAS 地址可随时改，无需重新打包</div>
+
+  <div class="card">
+    <label for="url">NAS 地址（App 直连端口 3080）</label>
+    <input id="url" type="text" inputmode="url" placeholder="http://192.168.31.10:3080" />
+    <div class="row">
+      <button id="btnTest">测试连接</button>
+      <button id="btnSave">保存</button>
+      <button id="btnAuto" class="ghost">自动探测</button>
+      <button id="btnFind" class="ghost">搜索本网段</button>
+    </div>
+    <div class="chips" id="chips"></div>
+  </div>
+
+  <div class="card">
+    <label for="manual">手动填写追溯码（扫码困难时用）</label>
+    <input id="manual" type="text" placeholder="输入追溯码后打开上传页" />
+    <div class="row"><button id="btnManual" class="ghost">用这个码打开上传页</button></div>
+  </div>
+
+  <button id="btnScan" class="primary">开始扫码</button>
+  <div id="status"></div>
+</div>
+
+<div id="scanui">
+  <div class="spin"></div>
+  <div class="msg">正在识别…</div>
+</div>
+
+<!-- zxing 浏览器版（构建时从 @zxing/library 的 UMD 包拷入，注册到全局 ZXing） -->
+<script src="./zxing.min.js"></script>
+
+<script>
+(function () {
+  var KEY_URL = 'nas_url', KEY_LIST = 'nas_list';
+  var DEFAULT_URL = 'http://192.168.31.10:3080';
+  var $ = function (id) { return document.getElementById(id); };
+  var statusEl = $('status');
+
+  function setStatus(msg, kind) {
+    statusEl.textContent = msg || '';
+    statusEl.className = kind || '';
+  }
+  function normalize(u) {
+    u = (u || '').trim();
+    if (!u) return '';
+    if (!/^https?:\/\//i.test(u)) u = 'http://' + u;
+    return u.replace(/\/+$/, '');
+  }
+  function getUrl() {
+    return normalize(localStorage.getItem(KEY_URL) || '') || DEFAULT_URL;
+  }
+  function getList() {
+    try {
+      var a = JSON.parse(localStorage.getItem(KEY_LIST) || '[]');
+      return Array.isArray(a) ? a : [];
+    } catch (e) { return []; }
+  }
+  function remember(u) {
+    u = normalize(u);
+    if (!u) return;
+    var list = getList().filter(function (x) { return x !== u; });
+    list.unshift(u);
+    localStorage.setItem(KEY_LIST, JSON.stringify(list.slice(0, 8)));
+    renderChips();
+  }
+  function renderChips() {
+    var box = $('chips');
+    var cur = normalize($('url').value);
+    box.innerHTML = '';
+    getList().forEach(function (u) {
+      var b = document.createElement('div');
+      b.className = 'chip' + (u === cur ? ' on' : '');
+      b.textContent = u.replace(/^https?:\/\//, '');
+      b.onclick = function () { $('url').value = u; renderChips(); };
+      box.appendChild(b);
+    });
+  }
+
+  // 探测可达性：no-cors 请求能发出即视为该地址有服务（规避跨域与证书干扰）
+  function probe(url, timeout) {
+    return new Promise(function (resolve) {
+      var done = false;
+      var timer = setTimeout(function () { if (!done) { done = true; resolve(false); } }, timeout || 2200);
+      fetch(url + '/?t=' + Date.now(), { mode: 'no-cors', cache: 'no-store' })
+        .then(function () { if (!done) { done = true; clearTimeout(timer); resolve(true); } })
+        .catch(function () { if (!done) { done = true; clearTimeout(timer); resolve(false); } });
+    });
+  }
+
+  function openUpload(code) {
+    var base = getUrl();
+    localStorage.setItem(KEY_URL, base);
+    remember(base);
+    setStatus('正在打开 ' + base + ' …');
+    window.location.href = base + '/?shell=1' + (code ? '&code=' + encodeURIComponent(code) : '');
+  }
+
+  // ---------- 扫码：系统相机拍照 → zxing 本地静态解码（不依赖 GMS / CameraX 预览） ----------
+  function getCamera() {
+    if (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Camera) {
+      return window.Capacitor.Plugins.Camera;
+    }
+    return null;
+  }
+
+  async function startScan() {
+    var base = getUrl();
+    localStorage.setItem(KEY_URL, base);
+    remember(base);
+
+    var Camera = getCamera();
+    if (!Camera) {
+      setStatus('未检测到相机组件，请确认安装的是最新版 App（或先用「手动填写追溯码」）', 'bad');
+      return;
+    }
+
+    // 1) 调系统相机拍照（所有安卓机通用，绕开 ML Kit 的 gms 依赖与 CameraX 兼容问题）
+    var photo;
+    try {
+      photo = await Camera.getPhoto({
+        quality: 80,
+        allowEditing: false,
+        resultType: 'dataUrl',
+        correctOrientation: true,
+        saveToGallery: false
+      });
+    } catch (e) {
+      // 用户取消拍照也算正常退出
+      var m = (e && (e.message || e.toString())) || '';
+      if (/cancel|denied|abort/i.test(m)) { setStatus('已取消拍照'); return; }
+      setStatus('未能启动相机：' + m + '（可先用「手动填写追溯码」）', 'bad');
+      return;
+    }
+
+    if (!photo || !photo.dataUrl) {
+      setStatus('没有拿到照片，请重试（或「手动填写追溯码」）', 'bad');
+      return;
+    }
+
+    // 2) 本地解码
+    document.body.classList.add('scanning');
+    try {
+      if (typeof ZXing === 'undefined' || !ZXing.BrowserMultiFormatReader) {
+        throw new Error('解码库未加载');
+      }
+      var img = new Image();
+      img.src = photo.dataUrl;
+      await img.decode();
+
+      // 下采样提速：zxing 对大图解码偏慢
+      var max = 1600;
+      var scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+      var cv = document.createElement('canvas');
+      cv.width = Math.max(1, Math.round(img.naturalWidth * scale));
+      cv.height = Math.max(1, Math.round(img.naturalHeight * scale));
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+
+      var reader = new ZXing.BrowserMultiFormatReader();
+      var result = null;
+      try {
+        // 第一刷：缩略图快解
+        result = await reader.decodeFromCanvas(cv);
+      } catch (e1) {
+        try {
+          // 第二刷：原图全分辨率 + TRY_HARDER，提升小条码/一维条码命中率
+          var hints = new Map();
+          hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+          result = await reader.decodeFromImage(img, hints);
+        } catch (e2) { /* 两刷都失败 → 判为未识别 */ }
+      }
+      var code = result && (result.getText ? result.getText() : result.text);
+      if (!code) throw new Error('未识别到条码');
+      document.body.classList.remove('scanning');
+      setStatus('识别成功：' + code, 'ok');
+      openUpload(code);
+    } catch (e) {
+      document.body.classList.remove('scanning');
+      var d = (e && (e.message || e.toString())) || String(e);
+      setStatus('没认出条码，请对准后重拍（或「手动填写追溯码」）：' + d, 'bad');
+    }
+  }
+
+  // ---------- 地址探测 ----------
+  async function autoDetect() {
+    var cands = [normalize($('url').value)].concat(getList(), [DEFAULT_URL]);
+    var seen = {}, uniq = [];
+    cands.forEach(function (u) { u = normalize(u); if (u && !seen[u]) { seen[u] = 1; uniq.push(u); } });
+    for (var i = 0; i < uniq.length; i++) {
+      setStatus('探测中：' + uniq[i] + '（' + (i + 1) + '/' + uniq.length + '）');
+      if (await probe(uniq[i], 2500)) {
+        $('url').value = uniq[i];
+        localStorage.setItem(KEY_URL, uniq[i]);
+        remember(uniq[i]);
+        renderChips();
+        setStatus('已连接：' + uniq[i], 'ok');
+        return uniq[i];
+      }
+    }
+    setStatus('没探测到可用地址，请手动填写或点“搜索本网段”', 'bad');
+    return null;
+  }
+
+  function localIp() {
+    return new Promise(function (resolve) {
+      try {
+        var pc = new RTCPeerConnection({ iceServers: [] });
+        pc.createDataChannel('');
+        pc.createOffer().then(function (o) { return pc.setLocalDescription(o); }).catch(function () {});
+        pc.onicecandidate = function (e) {
+          if (e && e.candidate && e.candidate.candidate) {
+            var m = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/.exec(e.candidate.candidate);
+            if (m && m[1] !== '127') { try { pc.close(); } catch (x) {} resolve(m[0]); }
+          }
+        };
+        setTimeout(function () { try { pc.close(); } catch (x) {} resolve(null); }, 3000);
+      } catch (e) { resolve(null); }
+    });
+  }
+
+  async function findInSubnet() {
+    var ip = await localIp();
+    if (!ip) {
+      setStatus('取不到本机网段，请手动填写 NAS 地址', 'bad');
+      return null;
+    }
+    var prefix = ip.split('.').slice(0, 3).join('.');
+    setStatus('本机 ' + ip + '，正在扫描 ' + prefix + '.1 ~ .254 …');
+    var found = null;
+    for (var i = 1; i <= 254 && !found; i += 32) {
+      var batch = [];
+      for (var j = i; j < Math.min(i + 32, 255); j++) batch.push(prefix + '.' + j);
+      await Promise.all(batch.map(function (host) {
+        return probe('http://' + host + ':3080', 1800).then(function (ok) {
+          if (ok && !found) {
+            found = 'http://' + host + ':3080';
+            $('url').value = found;
+            localStorage.setItem(KEY_URL, found);
+            remember(found);
+            renderChips();
+            setStatus('找到服务：' + found, 'ok');
+          }
+        });
+      }));
+      if (!found) setStatus('扫描中…已试到 ' + prefix + '.' + Math.min(i + 31, 254));
+    }
+    if (!found) setStatus('本网段没找到服务（NAS 可能在另一网段，或 3080 未开启直连）', 'bad');
+    return found;
+  }
+
+  // ---------- 事件绑定 ----------
+  $('url').value = getUrl();
+  renderChips();
+
+  $('btnSave').onclick = function () {
+    var u = normalize($('url').value);
+    if (!u) { setStatus('地址不能为空', 'bad'); return; }
+    localStorage.setItem(KEY_URL, u);
+    remember(u);
+    setStatus('已保存：' + u, 'ok');
+  };
+  $('btnTest').onclick = async function () {
+    var u = normalize($('url').value);
+    setStatus('测试 ' + u + ' …');
+    var ok = await probe(u, 3000);
+    setStatus(ok ? '连接正常：' + u : '连不上 ' + u + '（确认与 NAS 同一 WiFi、3080 已开启直连）', ok ? 'ok' : 'bad');
+  };
+  $('btnAuto').onclick = function () { autoDetect(); };
+  $('btnFind').onclick = function () { findInSubnet(); };
+  $('btnScan').onclick = function () { startScan(); };
+  $('btnManual').onclick = function () {
+    var c = ($('manual').value || '').trim();
+    if (!c) { setStatus('请先输入追溯码', 'bad'); return; }
+    openUpload(c);
+  };
+
+  // 首次进入自动检测一次
+  (async function () {
+    var u = getUrl();
+    setStatus('正在检测 ' + u + ' …');
+    var ok = await probe(u, 2500);
+    setStatus(ok ? '已连接：' + u + '，点下方按钮开始扫码' : '当前地址不通，请点“自动探测”或“搜索本网段”', ok ? 'ok' : 'bad');
+  })();
+})();
+</script>
+</body>
+</html>
