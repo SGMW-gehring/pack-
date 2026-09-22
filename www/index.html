@@ -42,7 +42,7 @@
 
 <div id="app">
   <h1>照片追溯上传</h1>
-  <div class="sub">原生相机拍照 + 本地解码（zxing）· NAS 地址可随时改，无需重新打包</div>
+  <div class="sub">原生相机拍照 · 本地 zxing + NAS 服务端双引擎解码 · NAS 地址可随时改，无需重新打包</div>
 
   <div class="card">
     <label for="url">NAS 地址（App 直连端口 3080）</label>
@@ -68,7 +68,7 @@
 
 <div id="scanui">
   <div class="spin"></div>
-  <div class="msg">正在识别…</div>
+  <div class="msg" id="scanmsg">正在识别…</div>
 </div>
 
 <!-- zxing 浏览器版（构建时从 @zxing/library 的 UMD 包拷入，注册到全局 ZXing） -->
@@ -148,6 +148,39 @@
     return null;
   }
 
+  function setScanMsg(t) {
+    var el = $('scanmsg');
+    if (el) el.textContent = t || '正在识别…';
+  }
+
+  function dataUrlToBlob(dataUrl) {
+    var arr = dataUrl.split(',');
+    var mime = (/:(.*?);/.exec(arr[0]) || [])[1] || 'image/jpeg';
+    var bstr = atob(arr[1]);
+    var u8 = new Uint8Array(bstr.length);
+    for (var i = 0; i < bstr.length; i++) u8[i] = bstr.charCodeAt(i);
+    return new Blob([u8], { type: mime });
+  }
+
+  // 服务端重型解码兜底：POST /api/decode（multipart 字段 image）
+  // NAS 端为 zxing-cpp + 对比度拉伸 + 条码区域定位 + 多尺度放大，擅长细条纹一维码/低对比度场景
+  async function serverDecode(dataUrl) {
+    var blob = dataUrlToBlob(dataUrl);
+    var fd = new FormData();
+    fd.append('image', blob, 'scan.jpg');
+    var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 30000) : null;
+    try {
+      var resp = await fetch(getUrl() + '/api/decode', { method: 'POST', body: fd, signal: ctrl ? ctrl.signal : undefined });
+      var j = await resp.json();
+      return (j && j.ok && j.text) ? j.text : null;
+    } catch (e) {
+      return null;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   async function startScan() {
     var base = getUrl();
     localStorage.setItem(KEY_URL, base);
@@ -214,7 +247,13 @@
         } catch (e2) { /* 两刷都失败 → 判为未识别 */ }
       }
       var code = result && (result.getText ? result.getText() : result.text);
-      if (!code) throw new Error('未识别到条码');
+
+      // 3) 本地两刷都没认出 → NAS 服务端重型解码兜底（对比度拉伸+条码定位+多尺度，擅长细条纹一维码）
+      if (!code) {
+        setScanMsg('本地没认出，改用 NAS 服务端识别…');
+        code = await serverDecode(photo.dataUrl);
+      }
+      if (!code) throw new Error('本地与 NAS 两种引擎均未识别到条码');
       document.body.classList.remove('scanning');
       setStatus('识别成功：' + code, 'ok');
       openUpload(code);
