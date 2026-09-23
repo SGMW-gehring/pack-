@@ -119,6 +119,32 @@
   var KEY_URL = 'nas_url', KEY_LIST = 'nas_list';
   var DEFAULT_URL = 'http://192.168.31.10:3080';
   var $ = function (id) { return document.getElementById(id); };
+
+  // ---- v4.5 可选增强：启动页「打开相机扫码」优先走原生 ZXing 组件（与上传页同一套桥接，更稳、体验同微信） ----
+  // 桥接由 App 原生层经 addJavascriptInterface 注入为 window.BarcodeScannerNative._scan(cbId)，
+  // 结果经 window.__barcodeResolve(cbId, value) 回传；浏览器/无原生环境下不存在 → hasNativeZXing() 为 false → 自动回退 getUserMedia 实时取景。
+  window.__barcodeCbs = window.__barcodeCbs || {};
+  window.__barcodeResolve = function (cbId, value) {
+    var r = window.__barcodeCbs[cbId];
+    if (r) { delete window.__barcodeCbs[cbId]; r(value || null); }
+  };
+  if (window.BarcodeScannerNative && window.BarcodeScannerNative._scan && !window.BarcodeScannerNative.scan) {
+    window.BarcodeScannerNative.scan = function () {
+      return new Promise(function (resolve) {
+        var id = 'bs_' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
+        window.__barcodeCbs[id] = resolve;
+        try { window.BarcodeScannerNative._scan(id); } catch (e) { delete window.__barcodeCbs[id]; resolve(null); }
+        // 兜底：原生未回传（异常/用户关闭）则 15s 后自动取消，避免 Promise 永远 pending
+        setTimeout(function () { if (window.__barcodeCbs[id]) { delete window.__barcodeCbs[id]; resolve(null); } }, 15000);
+      });
+    };
+  }
+  function hasNativeZXing() { return !!(window.BarcodeScannerNative && window.BarcodeScannerNative._scan); }
+  function nativeScanZXing() {
+    if (!hasNativeZXing()) return Promise.resolve(null);
+    return window.BarcodeScannerNative.scan().catch(function () { return null; });
+  }
+
   var statusEl = $('status');
 
   function setStatus(msg, kind) {
@@ -359,8 +385,8 @@
 
   function lvLoop() {
     if (!lvStream || lvBusy) return;
-    var full = (lvFails % 4 === 3); // 每 4 帧插一帧全画面（小尺寸），防条码贴边漏识
-    var cv = lvGrab(full ? 800 : 1100, full);
+    var full = (lvFails % 3 === 2); // 每 3 帧插一帧全画面，防条码贴边漏识
+    var cv = lvGrab(full ? 2000 : 1600, full);
     if (!cv) return;
     var ctx = cv.getContext('2d', { willReadFrequently: true });
     var id = ctx.getImageData(0, 0, cv.width, cv.height);
@@ -372,9 +398,9 @@
       // 本地连续 3 帧未中 → 静默发给 NAS 服务端重型引擎兜底（快帧约 1 秒即触发，慢帧约 6 秒）
       if (lvFails % 3 === 0 && !lvSrvBusy) {
         lvSrvBusy = true;
-        // v4.2.2：兜底帧改抓「全画面原生分辨率」（≤2560px）。此前直接把 1100px 本地解码小帧发给
-        // 服务端，密集条码只剩 ~2px/模块，NAS 引擎再强也没像素可用（视频实测双引擎全失败）。
-        var big = lvGrab(2560, true);
+        // v4.2.2→v4.4：兜底帧抓「全画面较高分辨率」（≤1920px）。服务端已加 12s 硬截止与候选压缩，
+        // 此前 2560px 大图 + 候选过多会触发 45s 级慢解；1900 级已足够 NAS 引擎吃清密集条码。
+        var big = lvGrab(1920, true);
         var dataUrl = null;
         try { if (big) dataUrl = big.toDataURL('image/jpeg', 0.85); } catch (e) {}
         if (dataUrl) {
@@ -633,7 +659,18 @@
   };
   $('btnAuto').onclick = function () { autoDetect(); };
   $('btnFind').onclick = function () { findInSubnet(); };
-  $('btnScan').onclick = function () { startLive(); }; // v35：默认进实时取景扫码
+  // v4.5 可选增强：优先原生全屏扫码（更稳、体验同微信）；无原生桥接（如浏览器）则回退实时取景扫码
+  $('btnScan').onclick = function () {
+    if (hasNativeZXing()) {
+      setStatus('调用原生扫码…');
+      nativeScanZXing().then(function (code) {
+        if (code) { openUpload(code); }
+        else { setStatus('未识别到条码，可点「手动填写追溯码」', ''); }
+      });
+    } else {
+      startLive();
+    }
+  };
   $('lvClose').onclick = function () { stopLive(); setStatus('已退出扫码'); };
   $('lvPhoto').onclick = function () { stopLive(); startScan(); }; // 实时识别不动时改拍一张
   $('lvTorch').onclick = function () { toggleTorch(); };
