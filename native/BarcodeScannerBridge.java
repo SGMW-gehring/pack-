@@ -34,9 +34,11 @@ public class BarcodeScannerBridge {
     }
 
     // 扫码成功/失败均回调此函数，把结果送回 WebView
+    // ⚠️ BridgeActivity.bridge 是 protected，非子类直接访问会编译报错（protected access），
+    //    必须走公开的 getBridge()（Capacitor 8 源码确认其存在）
     public static void deliver(String cbId, String value) {
-        if (act == null || act.bridge == null || act.bridge.getWebView() == null) return;
-        WebView wv = act.bridge.getWebView();
+        if (act == null || act.getBridge() == null || act.getBridge().getWebView() == null) return;
+        WebView wv = act.getBridge().getWebView();
         String js = "window.__barcodeResolve && window.__barcodeResolve("
                 + JSONObject.quote(cbId == null ? "" : cbId) + ","
                 + JSONObject.quote(value == null ? "" : value) + ");";
