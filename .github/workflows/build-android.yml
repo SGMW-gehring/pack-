@@ -60,8 +60,8 @@ jobs:
       # 版本号升到 4.1（本地+服务端双引擎解码）：手机「设置-应用信息」里看到 4.1 = 确认装的是新包
       - name: 版本号升为 4.1
         run: |
-          sed -i -E 's/versionName "[0-9.]+"/versionName "4.1"/' android/app/build.gradle
-          sed -i -E 's/versionCode [0-9]+/versionCode 5/' android/app/build.gradle
+          sed -i -E 's/versionName "[0-9.]+"/versionName "4.2"/' android/app/build.gradle
+          sed -i -E 's/versionCode [0-9]+/versionCode 6/' android/app/build.gradle
           grep -n "versionName\|versionCode" android/app/build.gradle
 
       - name: Build debug APK
