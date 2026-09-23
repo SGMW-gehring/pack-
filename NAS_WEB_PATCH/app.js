@@ -153,8 +153,8 @@
       state.noWebcam = true;
       setupNoWebcamUI();
       throw new Error(inShell()
-        ? '原生模式：网页相机不可用，拍照与扫码已切换为原生通道'
-        : '当前为 http 页面，网页相机不可用：请用 https:// 访问，或使用 App');
+        ? '原生模式已就绪：拍照走系统相机，追溯码点「识别追溯码」拍条码'
+        : '当前为 http 页面，网页相机不可用：请用 App 打开，或改用 https://' + location.hostname + ':3000 访问');
     }
     const tries = [
       // v27：ideal 降到 1920x1440（4:3 传感器全幅视野）。过高的 ideal（3000x2000）在部分
@@ -209,11 +209,34 @@
     if (cam) cam.srcObject = null;
   }
 
-  // ---------- v31：原生壳兜底（无网页相机时的扫码/拍照通道） ----------
+  // ---------- v34：原生壳判定（兼容 v4 架构，修复「App 内被判成浏览器」） ----------
+  // 历史 bug：旧判定用「是否存在 BarcodeScanner 插件」识别 App 内环境；v4 移除 ML Kit 后该插件不再注册，
+  // 条件恒 false → 明明在 App 里却走了浏览器分支，提示「请用 https:// 访问，或使用 App」。
+  // 现改为多信号叠加，任一命中即为原生壳：
+  //   ① URL 带 ?shell=1（App 启动页跳转时附加）→ 写入 sessionStorage，页面刷新/后退仍生效
+  //   ② sessionStorage 标记（命中过 ① 即长期有效，直到 ?shell=0）
+  //   ③ Capacitor 桥接存在且 isNativePlatform()（远程 http 页面若被注入桥接也能认出来）
+  //   ④ UA 含 PhotoUploaderShell（App 端 android.appendUserAgent 设置的后缀，跨跳转最可靠）
+  const SHELL_UA_RE = /PhotoUploaderShell/i;
+  const SHELL_KEY = 'pu_shell';
   function inShell() {
     try {
-      if (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.BarcodeScanner) return true;
-      return new URLSearchParams(location.search).get('shell') === '1';
+      const p = new URLSearchParams(location.search).get('shell');
+      if (p === '1') { try { sessionStorage.setItem(SHELL_KEY, '1'); } catch (e) {} return true; }
+      if (p === '0') { try { sessionStorage.removeItem(SHELL_KEY); } catch (e) {} return false; }
+      try { if (sessionStorage.getItem(SHELL_KEY) === '1') return true; } catch (e) {}
+      try {
+        if (window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform()) return true;
+      } catch (e) {}
+      return SHELL_UA_RE.test(navigator.userAgent || '');
+    } catch (e) { return false; }
+  }
+
+  // 原生相机插件是否可用（v4 只保留 @capacitor/camera，已无 BarcodeScanner）
+  function hasNativeCamera() {
+    try {
+      const C = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Camera;
+      return !!(C && C.getPhoto);
     } catch (e) { return false; }
   }
 
@@ -228,9 +251,10 @@
         const tip = document.createElement('div');
         tip.id = 'noCamTip';
         tip.style.cssText = 'position:absolute;inset:0;z-index:1;display:flex;align-items:center;justify-content:center;text-align:center;color:#8b93a5;font-size:14px;padding:0 24px;line-height:1.9;';
+        // v34：原生分支不再承诺「原生扫码」（v4 已移除 ML Kit），改为说明真实可用的两条通道
         tip.innerHTML = inShell()
-          ? '原生模式：按 <b>拍照键</b> 调用系统相机拍摄<br>追溯码用 App 启动页扫码，或按「识别追溯码」'
-          : '当前浏览器不支持网页相机<br>请用 https:// 访问，或使用 App';
+          ? '原生模式（App）：<br>按 <b>拍照键</b> 调用系统相机拍摄<br>追溯码已由启动页扫码带入；没有则点「识别追溯码」拍条码'
+          : '当前浏览器不可用网页相机<br>（http 属于非安全源）<br>请用 App 打开，或改用 <b>https://' + location.hostname + ':3000</b> 访问';
         camEl.parentElement.appendChild(tip);
       }
     } catch (e) {}
@@ -291,8 +315,11 @@
   }
 
   // 原生相机拍照（Capacitor Camera 插件）：彻底绕过 WebView 在 http(3080) 非安全源下禁用网页相机的问题。
-  // 返回 true=已成功拍并落库；false=插件不可用 / 用户取消 / 异常（调用方回退到系统相机文件选择器）。
+  // 返回 true=已成功拍并落库；false=插件不可用 / 用户取消 / 异常（调用方决定要不要回退文件选择器）。
+  // 取消原因记在 _lastCamErr：用户主动取消时不应再弹一次系统选择器，避免"点了返回又冒出来"。
+  let _lastCamErr = null;
   async function nativeCameraCapture() {
+    _lastCamErr = null;
     const C = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Camera;
     if (!C || !C.getPhoto) return false;
     try {
@@ -311,9 +338,11 @@
       await shootFromFile(file);
       return true;
     } catch (e) {
+      _lastCamErr = String((e && (e.message || e.errorMessage)) || e || '');
       return false;
     }
   }
+  function userCancelledCam() { return !!_lastCamErr && /cancel/i.test(_lastCamErr); }
 
   async function shootFromFile(file) {
     if (!validQr()) { toast('请先识别追溯码，再拍摄照片'); return; }
@@ -652,18 +681,112 @@
   }
   function hideFreeze() { hideModal('freezeModal'); }
 
+  // 取一张照片的 File：优先原生 Camera 插件（直接出图，体验最好）；
+  // 插件不可用（远程 http 页面未被注入桥接）或用户取消 → 回退 input[capture=environment]，
+  // 由安卓系统相机接手，任何机型都可用。取消则返回 null。
+  async function pickPhotoFile() {
+    if (hasNativeCamera()) {
+      _lastCamErr = null;
+      try {
+        const photo = await window.Capacitor.Plugins.Camera.getPhoto({
+          quality: 90, allowEditing: false, correctOrientation: true,
+          saveToGallery: false, resultType: 'uri', source: 'camera',
+        });
+        const uri = photo && (photo.webPath || photo.path);
+        if (uri) {
+          const b = await (await fetch(uri)).blob();
+          return new File([b], 'scan' + Date.now() + '.jpg', { type: b.type || 'image/jpeg' });
+        }
+      } catch (e) {
+        _lastCamErr = String((e && (e.message || e.errorMessage)) || e || '');
+        if (userCancelledCam()) return null; // 用户主动取消 → 不再兜一个选择器出来
+        // 插件异常 → 继续走系统相机文件选择器
+      }
+    }
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer = null;
+      const inp = document.createElement('input');
+      inp.type = 'file';
+      inp.accept = 'image/*';
+      try { inp.capture = 'environment'; } catch (e) {}
+      inp.style.display = 'none';
+      const done = (v) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        try { inp.remove(); } catch (e) {}
+        resolve(v);
+      };
+      timer = setTimeout(() => done(null), 180000);
+      inp.addEventListener('change', () => {
+        const f = inp.files && inp.files[0];
+        inp.value = '';
+        done(f || null);
+      });
+      document.body.appendChild(inp);
+      try { inp.click(); } catch (e) { done(null); }
+    });
+  }
+
+  // 按 File → 缩放后的 canvas（解码用，避免超大原图拖慢 zxing 与上传）
+  async function fileToCanvas(file, maxSide) {
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    await img.decode();
+    const w0 = img.naturalWidth || 1, h0 = img.naturalHeight || 1;
+    const scale = Math.min(1, (maxSide || 1600) / Math.max(w0, h0));
+    const cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.round(w0 * scale));
+    cv.height = Math.max(1, Math.round(h0 * scale));
+    cv.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0, cv.width, cv.height);
+    try { URL.revokeObjectURL(img.src); } catch (e) {}
+    return cv;
+  }
+
+  // App 内（无网页相机、无 ML Kit）识别追溯码：
+  // 系统相机拍一张条码 → ①本地 zxing 解全尺寸图 ②再解小图（有的码缩小反而更利落）
+  // ③交给 NAS /api/decode 服务端重型引擎（对比度拉伸 + 区域定位 + zxing-cpp）。
+  // 与 App 启动页 index.html 的双引擎策略保持一致。
+  async function shellPhotoDecode() {
+    toast(hasNativeCamera() ? '打开相机，对准条码…' : '打开系统相机，对准条码…');
+    const file = await pickPhotoFile();
+    if (!file) return;
+    try {
+      const idOf = (cv) => cv.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, cv.width, cv.height);
+      const full = await fileToCanvas(file, 1600);
+      toast('本地识别中…');
+      let text = await decodeImageDataRobust(idOf(full));
+      if (!text) {
+        const small = await fileToCanvas(file, 640);
+        text = await decodeImageDataRobust(idOf(small));
+        if (!text) {
+          toast('本地未解出，发送 NAS 服务端解码…');
+          text = await serverDecode(full) || await serverDecode(small);
+        }
+      }
+      if (text) {
+        onBarcode(text);
+        toast('追溯码：' + text.trim());
+      } else {
+        toast('未识别到条码：靠近些拍满条码、避开反光，或点「手动输入追溯码」');
+      }
+    } catch (e) {
+      toast('识别失败，可点「手动输入追溯码」');
+    }
+  }
+
   async function snapScan() {
-    // v31：无网页相机 → 壳内走原生扫码引擎；普通浏览器给出明确指引
+    // v34：无网页相机时的三条通道（旧版 ML Kit 插件 / App 拍照+服务端解码 / 普通浏览器）
     if (state.noWebcam || !cam.videoWidth) {
       if (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.BarcodeScanner) {
         toast('调用手机原生扫码…');
         const t = await nativeScanOnce();
         if (t) { onBarcode(t); } else { toast('未识别到条码，可点「手动输入追溯码」'); }
-      } else if (inShell()) {
-        toast('原生扫码组件未注入：请回 App 启动页点「开始扫码」');
-      } else {
-        toast('当前环境无相机：请用 App 打开，或浏览器以 https:// 访问');
+        return;
       }
+      if (inShell()) { await shellPhotoDecode(); return; }
+      toast('当前环境无相机：请用 App 打开，或浏览器以 https:// 访问');
       return;
     }
     // 原生壳内：优先用手机原生引擎扫码（ML Kit / Vision），一步到位
@@ -899,14 +1022,24 @@
   }
 
   async function shoot() {
-    // v31/v33：无网页相机（原生壳 http 直连）→ 优先原生相机插件，失败回退系统相机文件选择器
+    // v34：无网页相机（http 非安全源）→ 原生相机插件优先，失败回退系统相机文件选择器
     if (state.noWebcam) {
-      if (!validQr()) { toast('请先识别追溯码'); return; }
-      if (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Camera) {
+      if (!validQr()) {
+        // 没码不直接卡死：壳内顺手发起一次「拍条码」识别，浏览器则给出明确指引
+        toast('请先识别追溯码');
+        if (inShell()) await shellPhotoDecode();
+        else if (cam.videoWidth) await snapScan();
+        else toast('当前环境无相机：请用 App 打开，或浏览器以 https:// 访问');
+        return;
+      }
+      if (hasNativeCamera()) {
         toast('打开相机…');
         const ok = await nativeCameraCapture();
         if (ok) return;
-        // 插件不可用 / 用户取消 → 回退到系统相机文件选择器
+        if (userCancelledCam()) return; // 用户主动按了返回，别再弹一次选择器
+        // 插件不可用 / 异常 → 回退到系统相机文件选择器
+      } else {
+        toast('调用系统相机…');
       }
       ensureFileInput().click();
       return;
