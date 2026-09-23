@@ -11,9 +11,10 @@
     "build:ios": "cap sync ios && cd ios/App && pod install"
   },
   "dependencies": {
+    "@capacitor-community/camera-preview": "^8.0.1",
     "@capacitor/android": "^8.0.0",
     "@capacitor/camera": "^8.0.0",
-    "@capacitor/core": "^8.0.0",
+    "@capacitor/core": "^8.0.2",
     "@capacitor/ios": "^8.0.0",
     "@zxing/library": "^0.21.3"
   },

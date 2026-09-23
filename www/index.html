@@ -134,6 +134,14 @@
   function getUrl() {
     return normalize(localStorage.getItem(KEY_URL) || '') || DEFAULT_URL;
   }
+  // v4.2.2：地址以「输入框当前值」为准（所见即所得）。
+  // 视频实测坑：用户改了输入框但没点「保存」，openUpload 读 localStorage 旧值（曾被误存的
+  // 路由器地址 192.168.3.1）→ 跳上传页 CONNECTION_REFUSED、服务端兜底全发错地址。
+  function resolveBase() {
+    var u = normalize($('url').value);
+    if (u) { localStorage.setItem(KEY_URL, u); remember(u); return u; }
+    return getUrl();
+  }
   function getList() {
     try {
       var a = JSON.parse(localStorage.getItem(KEY_LIST) || '[]');
@@ -161,21 +169,24 @@
     });
   }
 
-  // 探测可达性：no-cors 请求能发出即视为该地址有服务（规避跨域与证书干扰）
+  // 探测可达性 v4.2.1：请求 /api/health 并验证 JSON（服务端已开 CORS）。
+  // v4.2 的 no-cors 探测有严重误判：任何在 3080 端口接受 TCP 的设备（如路由器网关）
+  // 都会被当成 NAS，导致「搜索本网段」把 192.168.x.1 存成服务器地址 → 上传页 CONNECTION_REFUSED。
   function probe(url, timeout) {
     return new Promise(function (resolve) {
       var done = false;
       var timer = setTimeout(function () { if (!done) { done = true; resolve(false); } }, timeout || 2200);
-      fetch(url + '/?t=' + Date.now(), { mode: 'no-cors', cache: 'no-store' })
-        .then(function () { if (!done) { done = true; clearTimeout(timer); resolve(true); } })
+      fetch(url + '/api/health?t=' + Date.now(), { cache: 'no-store' })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (j) {
+          if (!done) { done = true; clearTimeout(timer); resolve(!!(j && j.ok === true)); }
+        })
         .catch(function () { if (!done) { done = true; clearTimeout(timer); resolve(false); } });
     });
   }
 
   function openUpload(code) {
-    var base = getUrl();
-    localStorage.setItem(KEY_URL, base);
-    remember(base);
+    var base = resolveBase();
     setStatus('正在打开 ' + base + ' …');
     window.location.href = base + '/?shell=1' + (code ? '&code=' + encodeURIComponent(code) : '');
   }
@@ -204,7 +215,9 @@
 
   // 服务端重型解码兜底：POST /api/decode（multipart 字段 image）
   // NAS 端为 zxing-cpp + 对比度拉伸 + 条码区域定位 + 多尺度放大，擅长细条纹一维码/低对比度场景
+  // 注意：网络失败与「没解出」都返回 null，靠 serverDecode.lastError 区分（供实时取景显式提示）
   async function serverDecode(dataUrl) {
+    serverDecode.lastError = null;
     var blob = dataUrlToBlob(dataUrl);
     var fd = new FormData();
     fd.append('image', blob, 'scan.jpg');
@@ -215,6 +228,7 @@
       var j = await resp.json();
       return (j && j.ok && j.text) ? j.text : null;
     } catch (e) {
+      serverDecode.lastError = (e && (e.message || e.name)) || 'network';
       return null;
     } finally {
       if (timer) clearTimeout(timer);
@@ -320,12 +334,13 @@
     });
   }
 
-  // 抓当前画面中部横带（条码通常出现在视野中部），限制最大边长控制解码耗时
-  function lvGrab(maxEdge) {
+  // 抓当前画面（默认中部横带，条码常在视野中部；fullFrame=true 抓全画面兜条码贴边），
+  // 限制最大边长控制解码耗时
+  function lvGrab(maxEdge, fullFrame) {
     var v = $('lv');
     var vw = v.videoWidth, vh = v.videoHeight;
     if (!vw || !vh) return null;
-    var sy = Math.round(vh * 0.18), sh = Math.round(vh * 0.64);
+    var sy = fullFrame ? 0 : Math.round(vh * 0.18), sh = fullFrame ? vh : Math.round(vh * 0.64);
     var scale = Math.min(1, maxEdge / Math.max(vw, sh));
     var cw = Math.max(1, Math.round(vw * scale)), ch = Math.max(1, Math.round(sh * scale));
     var cv = document.createElement('canvas');
@@ -344,7 +359,8 @@
 
   function lvLoop() {
     if (!lvStream || lvBusy) return;
-    var cv = lvGrab(1100);
+    var full = (lvFails % 4 === 3); // 每 4 帧插一帧全画面（小尺寸），防条码贴边漏识
+    var cv = lvGrab(full ? 800 : 1100, full);
     if (!cv) return;
     var ctx = cv.getContext('2d', { willReadFrequently: true });
     var id = ctx.getImageData(0, 0, cv.width, cv.height);
@@ -356,23 +372,34 @@
       // 本地连续 3 帧未中 → 静默发给 NAS 服务端重型引擎兜底（快帧约 1 秒即触发，慢帧约 6 秒）
       if (lvFails % 3 === 0 && !lvSrvBusy) {
         lvSrvBusy = true;
+        // v4.2.2：兜底帧改抓「全画面原生分辨率」（≤2560px）。此前直接把 1100px 本地解码小帧发给
+        // 服务端，密集条码只剩 ~2px/模块，NAS 引擎再强也没像素可用（视频实测双引擎全失败）。
+        var big = lvGrab(2560, true);
         var dataUrl = null;
-        try { dataUrl = cv.toDataURL('image/jpeg', 0.85); } catch (e) {}
+        try { if (big) dataUrl = big.toDataURL('image/jpeg', 0.85); } catch (e) {}
         if (dataUrl) {
           serverDecode(dataUrl).then(function (t2) {
             lvSrvBusy = false;
-            if (t2 && lvStream) lvHit(String(t2).trim());
-          }).catch(function () { lvSrvBusy = false; });
+            if (t2 && lvStream) { lvHit(String(t2).trim()); return; }
+            if (!t2 && serverDecode.lastError) lvSrvFail(); // 网络层失败（地址错/连不上）才告警
+          }).catch(function () { lvSrvFail(); });
         } else { lvSrvBusy = false; }
       }
+      if (lvFails === 10) lvSetStatus('还在识别… 已分析 ' + lvFails + ' 帧，离近一点或开补光');
       if (lvFails === 25) lvSetStatus('还没认出：离条码近一点、对准框内，或开补光');
     });
   }
 
+  // 服务端兜底连续失败 → 大概率首页 NAS 地址不对（v4.2 曾被网关地址坑过），显式提醒而不是静默
+  var lvSrvErr = 0;
+  function lvSrvFail() {
+    lvSrvBusy = false;
+    lvSrvErr++;
+    if (lvSrvErr === 2) lvSetStatus('⚠️ 服务端兜底连不上：回首页核对 NAS 地址（不是路由器地址）', 'bad');
+  }
+
   async function startLive() {
-    var base = getUrl();
-    localStorage.setItem(KEY_URL, base);
-    remember(base);
+    var base = resolveBase();
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.isSecureContext) {
       setStatus('此环境不支持实时取景，改用拍照识别', '');
       startScan();
@@ -394,7 +421,7 @@
       startScan();
       return;
     }
-    lvStream = stream; lvFails = 0; lvBusy = false; lvTorchOn = false;
+    lvStream = stream; lvFails = 0; lvBusy = false; lvTorchOn = false; lvSrvErr = 0;
     var v = $('lv');
     v.srcObject = stream;
     try { await v.play(); } catch (e) {}
@@ -426,9 +453,7 @@
   }
 
   async function startScan() {
-    var base = getUrl();
-    localStorage.setItem(KEY_URL, base);
-    remember(base);
+    var base = resolveBase();
 
     var Camera = getCamera();
     if (!Camera) {
@@ -503,6 +528,10 @@
       if (!code) {
         setScanMsg('本地没认出，改用 NAS 服务端识别…');
         code = await serverDecode(photo.dataUrl);
+        // v4.2.2：网络失败≠没解出。地址错（如误存路由器地址）时明确指路，不再误报「双引擎未识别」
+        if (!code && serverDecode.lastError) {
+          throw new Error('NAS 服务端连不上（' + serverDecode.lastError + '）：回首页核对 NAS 地址并点「保存」');
+        }
       }
       if (!code) throw new Error('本地与 NAS 两种引擎均未识别到条码');
       document.body.classList.remove('scanning');
@@ -563,7 +592,10 @@
     var found = null;
     for (var i = 1; i <= 254 && !found; i += 32) {
       var batch = [];
-      for (var j = i; j < Math.min(i + 32, 255); j++) batch.push(prefix + '.' + j);
+      for (var j = i; j < Math.min(i + 32, 255); j++) {
+        if (j === 1 || j >= 254) continue; // 跳过网关 .1 与 .254/.255（v4.2 曾把网关误存为 NAS 地址）
+        batch.push(prefix + '.' + j);
+      }
       await Promise.all(batch.map(function (host) {
         return probe('http://' + host + ':3080', 1800).then(function (ok) {
           if (ok && !found) {
