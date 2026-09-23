@@ -729,8 +729,22 @@
     });
   }
 
-  // 按 File → 缩放后的 canvas（解码用，避免超大原图拖慢 zxing 与上传）
+  // 按 File → 缩放后的 canvas（解码用，避免超大原图拖慢 zxing 与上传）。
+  // v35：优先 createImageBitmap——图片解码+缩放发生在主线程之外，12MP 照片不再冻住页面。
   async function fileToCanvas(file, maxSide) {
+    if (window.createImageBitmap) {
+      try {
+        const bmp = await createImageBitmap(file); // 解码在后台线程完成
+        const w0 = bmp.width || 1, h0 = bmp.height || 1;
+        const scale = Math.min(1, (maxSide || 1600) / Math.max(w0, h0));
+        const cw = Math.max(1, Math.round(w0 * scale)), ch = Math.max(1, Math.round(h0 * scale));
+        const cv = document.createElement('canvas');
+        cv.width = cw; cv.height = ch;
+        cv.getContext('2d', { willReadFrequently: true }).drawImage(bmp, 0, 0, cw, ch);
+        try { bmp.close(); } catch (e) {}
+        return cv;
+      } catch (e) { /* 个别 ROM 对该格式不支持 → 落回老路径 */ }
+    }
     const img = new Image();
     img.src = URL.createObjectURL(file);
     await img.decode();

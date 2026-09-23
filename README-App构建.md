@@ -1,16 +1,22 @@
-# App 包构建说明（v4.1 / 最终版：原生相机拍照 + 双引擎解码 + UA 环境标记）
+# App 包构建说明（v4.2 / 最终版：实时取景连续扫码 + Worker 后台解码 + UA 环境标记）
 
 本目录是 **Android App 原生壳源码**，用于上传到你的 GitHub 仓库，由 GitHub Actions 云端构建出 APK。
 **无需在本机装 Android SDK / Node 全量环境**——全在云端完成。
+
+> 🔧 随查随抄的命令行版本见 **`App端命令速查.md`**（含 GitHub Actions 推法、本机出包、安装验收、排错）。
+> ⚠️ **v4.2 必须重新出包，且必须先卸载旧 App 再安装**：
+> 1. `appendUserAgent`（v34 环境标记）与 `androidScheme: 'https'`（v35 实时取景解锁）都是原生配置，只有重新构建 APK 才生效；
+> 2. androidScheme 变更会更换 WebView 存储源（旧 localStorage 里的 NAS 地址会丢），所以不能覆盖安装。
+> 装好后版本应为 **4.2**。
 
 ## 目录内容
 ```
 App/
 ├── package.json              # 已加 @capacitor/camera（原生相机）+ @zxing/library（本地解码）
-├── capacitor.config.ts       # Camera 插件 + appendUserAgent（v34 环境标记）；已去掉 ML Kit，避免 gms 依赖
+├── capacitor.config.ts       # Camera 插件 + UA 标记 + androidScheme https（v35 实时取景解锁）
 ├── tsconfig.json
 ├── .github/workflows/build-android.yml   # 构建流程（拷贝 zxing UMD + 相机权限硬校验）
-├── www/index.html            # 启动页（填 NAS 地址、系统相机拍照 → zxing 本地解码 → NAS 服务端解码兜底）
+├── www/index.html            # 启动页（实时取景连续扫码 + Worker 后台解码 + 拍照识别兜底 + NAS 服务端解码）
 └── NAS_WEB_PATCH/            # NAS 端 app.js 等，备查/离线部署用（不影响 App 构建）
 ```
 
@@ -40,7 +46,7 @@ App/
 
 ## 安装与验证
 1. **先卸载手机上的旧 App**（避免版本混淆）。
-2. 装 `app-debug.apk` → 「设置-应用信息」确认：版本 **4.1**、权限列表出现 **相机**。
+2. 装 `app-debug.apk` → 「设置-应用信息」确认：版本 **4.2**、权限列表出现 **相机**。
 3. 打开 App → 填/探测 `http://<NAS_IP>:3080` → 测试连接 → **开始扫码** → 调起系统相机拍照 → 自动识别后跳上传页。
    - 识别不出时提示「没认出条码，请对准后重拍」，不会卡死；也可用「手动填写追溯码」兜底。
 4. 上传页点**拍照键** → 调起原生相机 → 拍完自动落库上传。
@@ -49,7 +55,7 @@ App/
 ## 说明
 - App 不写死 NAS 地址：启动页运行时填，换 IP/网段不需要重新打包。
 - 扫码与拍照都走原生 `@capacitor/camera`，解码用 zxing（**无任何 Google 服务依赖**）——适配所有安卓机型。
-- 版本号固定在 4.1（workflow 自动改 `build.gradle`），装好后看到 4.1 即确认装的是新包。
+- 版本号固定在 4.2（workflow 自动改 `build.gradle`），装好后看到 4.2 即确认装的是新包。
 - **v34 的 UA 标记**：`capacitor.config.ts` 追加了 `appendUserAgent: ' PhotoUploaderShell/1.0'`，
   NAS 上传页靠它稳定识别「此刻在 App 里」，不会再把 App 误判成浏览器。这是**原生工程配置**，
   **改了必须重新构建 APK**才会写进 WebView 设置；NAS 那半边用 `deploy-nas.sh` 热注入即可，两边不必同批次。
