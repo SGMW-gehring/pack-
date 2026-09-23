@@ -18,7 +18,9 @@ jobs:
           node-version: '22'
 
       - name: Install deps
-        run: npm install
+        # --legacy-peer-deps：@capacitor-community/camera-preview 的 peer(@capacitor/core>=8.0.2)
+        # 与部分依赖解析严格模式可能冲突，CI 直接 ERESOLVE 失败；放宽后由 cap sync 保证原生一致
+        run: npm install --legacy-peer-deps
 
       # Capacitor 8 的安卓模块要求 Java 21（runner 默认 17，会报 invalid source release: 21）
       - name: Set up JDK 21
@@ -37,6 +39,52 @@ jobs:
 
       - name: Add Android platform
         run: npx cap add android
+
+      # 修复 App 内无法下载（图片/压缩包）：Android WebView 默认没有 DownloadListener，
+      # 遇到服务端 attachment 响应会被静默忽略。此处注入一个 DownloadListener，
+      # 把附件下载交给系统 DownloadManager 落到「下载」目录。NAS 端与浏览器路径完全不动。
+      # 注入失败也只是「保持现状」，不会让构建崩。
+      - name: 启用 WebView 附件下载
+        run: |
+          python3 - <<'EOF'
+          import glob, sys
+          fps = glob.glob('android/app/src/main/java/**/MainActivity.java', recursive=True)
+          if not fps:
+              print("!! 未找到 MainActivity.java，跳过下载监听注入（下载功能保持现状）"); sys.exit(0)
+          p = fps[0]
+          s = open(p, encoding='utf-8').read()
+          if 'setDownloadListener' in s:
+              print("已注入，跳过"); sys.exit(0)
+          marker = 'public class MainActivity extends BridgeActivity {'
+          if marker not in s:
+              print("!! MainActivity 结构不匹配，跳过"); sys.exit(0)
+          inject = '''
+            private boolean dlReady = false;
+            @Override
+            public void onStart() {
+              super.onStart();
+              if (!dlReady && this.bridge != null && this.bridge.getWebView() != null) {
+                dlReady = true;
+                this.bridge.getWebView().setDownloadListener(new android.webkit.DownloadListener() {
+                  public void onDownloadStart(String url, String ua, String cd, String mt, long len) {
+                    android.app.DownloadManager dm = (android.app.DownloadManager) getSystemService(android.content.Context.DOWNLOAD_SERVICE);
+                    if (dm == null) return;
+                    android.net.Uri uri = android.net.Uri.parse(url);
+                    android.app.DownloadManager.Request r = new android.app.DownloadManager.Request(uri);
+                    r.addRequestHeader("User-Agent", ua);
+                    if (mt != null) r.setMimeType(mt);
+                    r.setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+                    r.setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_DOWNLOADS, android.webkit.URLUtil.guessFileName(url, cd, mt));
+                    dm.enqueue(r);
+                  }
+                });
+              }
+            }
+          '''
+          s = s.replace(marker, marker + '\n' + inject, 1)
+          open(p, 'w', encoding='utf-8').write(s)
+          print("已注入 DownloadListener -> " + p)
+          EOF
 
       # Capacitor 默认不声明相机权限，扫码会失败（必须显式加入 Manifest）
       - name: 添加相机权限
@@ -57,8 +105,8 @@ jobs:
       - name: Sync native
         run: npx cap sync android
 
-      # 版本号升到 4.1（本地+服务端双引擎解码）：手机「设置-应用信息」里看到 4.1 = 确认装的是新包
-      - name: 版本号升为 4.1
+      # 版本号升到 4.2（实时取景 + https 安全上下文）：手机「设置-应用信息」里看到 4.2 = 确认装的是新包
+      - name: 版本号升为 4.2
         run: |
           sed -i -E 's/versionName "[0-9.]+"/versionName "4.2"/' android/app/build.gradle
           sed -i -E 's/versionCode [0-9]+/versionCode 6/' android/app/build.gradle
