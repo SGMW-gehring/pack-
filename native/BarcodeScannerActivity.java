@@ -181,7 +181,7 @@ public class BarcodeScannerActivity extends AppCompatActivity {
 
             ImageAnalysis analysis = new ImageAnalysis.Builder()
                     .setTargetResolution(new Size(1280, 720))
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_LATEST)
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build();
 
             final String[] found = {null};
