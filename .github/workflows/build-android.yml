@@ -47,6 +47,9 @@ jobs:
           mkdir -p "$DST"
           cp native/BarcodeScannerBridge.java "$DST/"
           cp native/BarcodeScannerActivity.java "$DST/"
+          # v4.8：原生拍照页（连拍、无系统相机「确定」步骤）
+          cp native/PhotoShootBridge.java "$DST/"
+          cp native/PhotoShootActivity.java "$DST/"
           ls -l "$DST"
 
       - name: Sync native
@@ -100,6 +103,10 @@ jobs:
                 scanReady = true;
                 BarcodeScannerBridge.bind(this);
                 this.bridge.getWebView().addJavascriptInterface(new BarcodeScannerBridge(), "BarcodeScannerNative");
+                // 原生拍照桥接（v4.8）：JS 调 window.PhotoShootNative._shoot() 拉起全屏拍照页，
+                // 拍完直接回传图片给页面，不再经过系统相机的「确定」步骤
+                PhotoShootBridge.bind(this);
+                this.bridge.getWebView().addJavascriptInterface(new PhotoShootBridge(), "PhotoShootNative");
               }
             }
           '''
@@ -138,6 +145,18 @@ jobs:
           else:
               print("Manifest Activity 已存在，跳过")
 
+          # ③-b v4.8：注册原生拍照 Activity
+          ms = open(m, encoding='utf-8').read()
+          if 'PhotoShootActivity' not in ms:
+              ms = re.sub(r'(<application[^>]*>)',
+                  # 不锁方向：拍照页跟随设备当前朝向（横屏作业也不强制转竖屏），布局本身自适应
+                  r'\1\n        <activity android:name=".PhotoShootActivity" android:exported="false" android:theme="@style/Theme.AppCompat.NoActionBar" android:hardwareAccelerated="true" android:configChanges="orientation|screenSize|keyboardHidden" />',
+                  ms, count=1)
+              open(m, 'w', encoding='utf-8').write(ms)
+              print("Manifest PhotoShootActivity 已注册")
+          else:
+              print("Manifest PhotoShootActivity 已存在，跳过")
+
           # ④ 兜底相机权限（Camera 插件通常会加，这里确保一定在）
           if 'android.permission.CAMERA' not in ms:
               ms = re.sub(r'(<manifest[^>]*>)',
@@ -149,11 +168,12 @@ jobs:
               print("相机权限已存在，跳过")
           PYEOF
 
-      # 版本号升到 4.6（原生扫码 v2：网页级解码管线 + 超时兜底）：手机「设置-应用信息」里看到 4.6 = 确认装的是新包
-      - name: 版本号升为 4.6
+          # 版本号升到 4.8（原生拍照页连拍 + 扫码取景框放大/自动对焦 + 小屏适配）：
+      # 手机「设置-应用信息」里看到 4.8 = 确认装的是新包
+      - name: 版本号升为 4.8
         run: |
-          sed -i -E 's/versionName "[0-9.]+"/versionName "4.6"/' android/app/build.gradle
-          sed -i -E 's/versionCode [0-9]+/versionCode 9/' android/app/build.gradle
+          sed -i -E 's/versionName "[0-9.]+"/versionName "4.8"/' android/app/build.gradle
+          sed -i -E 's/versionCode [0-9]+/versionCode 11/' android/app/build.gradle
           grep -n "versionName\|versionCode" android/app/build.gradle
 
       - name: Build debug APK
