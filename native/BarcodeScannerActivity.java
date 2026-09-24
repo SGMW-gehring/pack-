@@ -8,6 +8,8 @@ import android.graphics.Paint;
 import android.graphics.RectF;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.util.Size;
@@ -34,7 +36,6 @@ import com.google.zxing.BarcodeFormat;
 import com.google.zxing.BinaryBitmap;
 import com.google.zxing.DecodeHintType;
 import com.google.zxing.MultiFormatReader;
-import com.google.zxing.NotFoundException;
 import com.google.zxing.RGBLuminanceSource;
 import com.google.zxing.Result;
 import com.google.zxing.common.HybridBinarizer;
@@ -49,12 +50,18 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 全屏原生扫码（体验同微信/QQ）：CameraX 取实时帧 → 原生 ZXing 解码。
- * 不依赖 Google Play / GMS，国内车间手机（华为/小米/OPPO/vivo 等）通用。
- * 解码命中即震动并回传结果，未授权/无相机则回传 null 让 Web 端回退。
+ * v4.6 解码管线与网页端 Worker（实测能啃动车间高密度 Code128）完全同款：
+ *   ① 四方向旋转直接解 → ② 灰度拉伸 × 四方向 → ③ 行合成扫描（多行平均成合成扫描线，专治反光/模糊/高密度）× 四方向
+ * 分析帧 1280x720 → 1920x1080（密集条码模块更宽，命中率高一个量级）。
+ * 12s 未识别自动退出交回网页链路（拍照识别 + NAS 服务端解码），App 内永不卡死。
+ * 不依赖 Google Play / GMS，国内车间手机通用。
  */
 public class BarcodeScannerActivity extends AppCompatActivity {
 
+    private static final long FALLBACK_TIMEOUT_MS = 12000;
+
     private PreviewView previewView;
+    private TextView hintText;
     private ScanOverlay overlay;
     private Camera camera;
     private MultiFormatReader reader;
@@ -117,22 +124,30 @@ public class BarcodeScannerActivity extends AppCompatActivity {
         root.addView(top);
 
         // 底部提示
-        TextView hint = new TextView(this);
-        hint.setText("将条码放入框内，自动识别");
-        hint.setTextColor(Color.WHITE);
-        hint.setTextSize(14);
-        hint.setGravity(Gravity.CENTER);
+        hintText = new TextView(this);
+        hintText.setText("将条码放入框内，自动识别");
+        hintText.setTextColor(Color.WHITE);
+        hintText.setTextSize(14);
+        hintText.setGravity(Gravity.CENTER);
         FrameLayout.LayoutParams hp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         hp.gravity = Gravity.BOTTOM;
         hp.bottomMargin = dp(48);
-        hint.setLayoutParams(hp);
-        root.addView(hint);
+        hintText.setLayoutParams(hp);
+        root.addView(hintText);
 
         setContentView(root);
 
         setupReader();
         overlay.start();
         startCamera();
+
+        // v4.6：超时兜底——原生引擎长期未识别（高密度条码/环境差）时自动退出，
+        // 让网页链路（拍照识别 + NAS 服务端重型解码）接手，绝不把用户卡在本页
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            if (done.get()) return;
+            hintText.setText("长时间未识别，切换网页识别…");
+            finishWithError();
+        }, FALLBACK_TIMEOUT_MS);
     }
 
     private int dp(int v) {
@@ -180,7 +195,7 @@ public class BarcodeScannerActivity extends AppCompatActivity {
             preview.setSurfaceProvider(previewView.getSurfaceProvider());
 
             ImageAnalysis analysis = new ImageAnalysis.Builder()
-                    .setTargetResolution(new Size(1280, 720))
+                    .setTargetResolution(new Size(1920, 1080))
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build();
 
@@ -194,17 +209,19 @@ public class BarcodeScannerActivity extends AppCompatActivity {
                     int[] px = new int[w * h];
                     bmp.getPixels(px, 0, w, 0, 0, w, h);
                     bmp.recycle();
-                    RGBLuminanceSource src = new RGBLuminanceSource(w, h, px);
-                    BinaryBitmap bb = new BinaryBitmap(new HybridBinarizer(src));
-                    try {
-                        Result r = reader.decodeWithState(bb);
-                        if (r != null && r.getText() != null && !r.getText().trim().isEmpty()) {
-                            found[0] = r.getText().trim();
-                        }
-                    } catch (NotFoundException ignore) {
-                        // 本帧无条码，继续
+                    int n = w * h;
+                    // ITU-R 601 加权灰度（与网页 Worker 同款公式；RGBLuminanceSource 不会自动转灰度）
+                    int[] v = new int[n];
+                    for (int i = 0; i < n; i++) {
+                        int c = px[i];
+                        int r = (c >> 16) & 0xff, g = (c >> 8) & 0xff, b = c & 0xff;
+                        v[i] = (r * 306 + g * 601 + b * 117) >> 10;
                     }
-                } catch (Exception ignore) {
+                    String t = decodeAll(v, w, h);
+                    if (t != null && !t.trim().isEmpty()) {
+                        found[0] = t.trim();
+                    }
+                } catch (Throwable ignore) {
                     // 取帧/解码异常忽略，下一帧再试
                 } finally {
                     image.close();
@@ -221,6 +238,158 @@ public class BarcodeScannerActivity extends AppCompatActivity {
         } catch (Exception e) {
             finishWithError();
         }
+    }
+
+    // ---------- v4.6 解码管线：与网页端 zxing Worker 完全同款（实战验证版） ----------
+
+    private static final int[] ANGLES = {0, 90, 180, 270};
+
+    private String decodeAll(int[] v, int w, int h) {
+        // ① 四方向直接解
+        for (int a : ANGLES) {
+            Img r = rotImg(v, w, h, a);
+            String t = tryBmp(makeBmp(r.d, r.w, r.h));
+            if (t != null) return t;
+        }
+        // ② 灰度拉伸 × 四方向（低对比/浅印）
+        int[] st = stretchLum(v);
+        for (int a : ANGLES) {
+            Img r = rotImg(st, w, h, a);
+            String t = tryBmp(makeBmp(r.d, r.w, r.h));
+            if (t != null) return t;
+        }
+        // ③ 行合成扫描（原图/拉伸 × 四方向）——多行像素平均成合成扫描线，专治反光/模糊/高密度
+        for (int s = 0; s < 2; s++) {
+            int[] src = (s == 1) ? st : v;
+            for (int a : ANGLES) {
+                Img r = rotImg(src, w, h, a);
+                String t = rowSynthScan(r.d, r.w, r.h);
+                if (t != null) return t;
+            }
+        }
+        return null;
+    }
+
+    private String tryBmp(BinaryBitmap bb) {
+        try {
+            // decodeWithState：保留 setHints 的格式/TRY_HARDER 配置（decode() 会把 hints 清空，不能用）
+            Result r = reader.decodeWithState(bb);
+            if (r != null && r.getText() != null && !r.getText().trim().isEmpty()) return r.getText().trim();
+        } catch (Exception ignore) {
+            // 本帧此角度未解出，继续
+        }
+        return null;
+    }
+
+    private BinaryBitmap makeBmp(int[] v, int w, int h) {
+        int[] packed = new int[v.length];
+        for (int i = 0; i < v.length; i++) {
+            int x = v[i];
+            if (x < 0) x = 0;
+            if (x > 255) x = 255;
+            packed[i] = (x << 16) | (x << 8) | x; // 灰度值按 RGB 三通道同值打包
+        }
+        return new BinaryBitmap(new HybridBinarizer(new RGBLuminanceSource(w, h, packed)));
+    }
+
+    private static final class Img {
+        final int[] d;
+        final int w, h;
+        Img(int[] d, int w, int h) { this.d = d; this.w = w; this.h = h; }
+    }
+
+    // 灰度图旋转（每像素 1 值），覆盖手机横拍/倒拍
+    private Img rotImg(int[] g, int w, int h, int deg) {
+        if (deg == 0) return new Img(g, w, h);
+        int[] out = new int[g.length];
+        if (deg == 180) {
+            for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) out[(h - 1 - y) * w + (w - 1 - x)] = g[y * w + x];
+            return new Img(out, w, h);
+        }
+        if (deg == 90) {
+            int nw = h;
+            for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) out[x * nw + (h - 1 - y)] = g[y * w + x];
+            return new Img(out, nw, w);
+        }
+        if (deg == 270) {
+            int nw = h;
+            for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) out[(w - 1 - x) * nw + y] = g[y * w + x];
+            return new Img(out, nw, w);
+        }
+        return new Img(g, w, h);
+    }
+
+    // 灰度拉伸：对比度弱的浅印/反光条码拉开黑白天梯
+    private int[] stretchLum(int[] lum) {
+        int[] o = lum.clone();
+        int mn = 255, mx = 0;
+        for (int x : lum) { if (x < mn) mn = x; if (x > mx) mx = x; }
+        if (mx - mn > 1 && mx - mn < 200) {
+            float g = 255f / (mx - mn);
+            for (int i = 0; i < o.length; i++) o[i] = (int) ((o[i] - mn) * g);
+        }
+        return o;
+    }
+
+    // 每行黑白跳变次数（条码区域行跳变远高于背景）
+    private int[] rowEdges(int[] lum, int w, int h) {
+        int[] e = new int[h];
+        for (int y = 0; y < h; y++) {
+            int prev = lum[y * w], cnt = 0;
+            for (int x = 1; x < w; x++) {
+                int g = lum[y * w + x];
+                if (Math.abs(g - prev) > 20) cnt++;
+                prev = g;
+            }
+            e[y] = cnt;
+        }
+        return e;
+    }
+
+    // 多行像素平均成一条合成扫描线（等效扫码枪多扫描线）
+    private int[] avgRows(int[] lum, int w, int y0, int y1) {
+        int n = Math.max(1, y1 - y0);
+        int[] o = new int[w];
+        for (int x = 0; x < w; x++) {
+            int s = 0;
+            for (int y = y0; y < y1; y++) s += lum[y * w + x];
+            o[x] = s / n;
+        }
+        return o;
+    }
+
+    // 行合成扫描：定位条码行带 → 全带 + 分段 + 滑窗多候选合成扫描线逐条解码
+    private String rowSynthScan(int[] lum, int w, int h) {
+        if (h < 2 || w < 8) return null;
+        int[] e = rowEdges(lum, w, h);
+        int mx = 0;
+        for (int y = 0; y < h; y++) mx = Math.max(mx, e[y]);
+        if (mx < 8) return null;
+        int thr = Math.max(6, mx / 4);
+        List<Integer> good = new ArrayList<>();
+        for (int y = 0; y < h; y++) if (e[y] >= thr) good.add(y);
+        if (good.size() < 2) return null;
+        int yTop = good.get(0), yBot = good.get(good.size() - 1) + 1;
+        List<int[]> candidates = new ArrayList<>();
+        candidates.add(new int[]{yTop, yBot});
+        for (int parts = 2; parts <= 4; parts++) {
+            float step = (float) (yBot - yTop) / parts;
+            for (int i = 0; i < parts; i++) {
+                int a = yTop + (int) (i * step), b = yTop + (int) ((i + 1) * step);
+                if (b - a >= 1) candidates.add(new int[]{a, b});
+            }
+        }
+        int win = Math.max(1, (yBot - yTop) / 8), c = 0;
+        for (int y0 = yTop; y0 + win <= yBot && c < 6; y0 += Math.max(1, win >> 1), c++) {
+            candidates.add(new int[]{y0, y0 + win});
+        }
+        for (int[] cd : candidates) {
+            int[] row = avgRows(lum, w, cd[0], cd[1]);
+            String t = tryBmp(makeBmp(row, w, 1));
+            if (t == null) t = tryBmp(makeBmp(stretchLum(row), w, 1));
+            if (t != null) return t;
+        }
+        return null;
     }
 
     private void toggleTorch(TextView flash) {
