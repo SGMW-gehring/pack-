@@ -689,6 +689,15 @@
     setStatus(ok ? '已连接：' + u + '，点下方按钮开始扫码' : '当前地址不通，请点“自动探测”或“搜索本网段”', ok ? 'ok' : 'bad');
   })();
 })();
+
+// v4.8：启动页底部版本标识——装机后在「打开相机扫码」前一眼确认装的是哪个包，
+// 与 NAS 上传页顶栏的版本号对得上才算两端同步（避免只更新一端导致的现象对不上）。
+(function () {
+  var t = document.createElement('div');
+  t.textContent = 'App v4.8';
+  t.style.cssText = 'position:fixed;left:0;right:0;bottom:6px;text-align:center;color:#8b93a5;font-size:11px;opacity:.75;pointer-events:none;z-index:9;';
+  document.body.appendChild(t);
+})();
 </script>
 </body>
 </html>

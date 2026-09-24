@@ -24,8 +24,10 @@ import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.camera.core.Camera;
 import androidx.camera.core.CameraSelector;
+import androidx.camera.core.FocusMeteringAction;
 import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.ImageProxy;
+import androidx.camera.core.MeteringPoint;
 import androidx.camera.core.Preview;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
@@ -84,6 +86,15 @@ public class BarcodeScannerActivity extends AppCompatActivity {
 
         overlay = new ScanOverlay(this);
         overlay.setLayoutParams(new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        // v4.8：点按画面任意位置即对焦到该点（老机近距合焦慢时，手动点一下立刻清晰）
+        overlay.setOnTouchListener((v, ev) -> {
+            if (ev.getAction() == android.view.MotionEvent.ACTION_UP) {
+                float nx = ev.getX() / Math.max(1f, v.getWidth());
+                float ny = ev.getY() / Math.max(1f, v.getHeight());
+                focusAt(nx, ny);
+            }
+            return true;
+        });
         root.addView(overlay);
 
         // 顶栏：关闭 / 标题 / 补光
@@ -235,9 +246,39 @@ public class BarcodeScannerActivity extends AppCompatActivity {
             CameraSelector selector = new CameraSelector.Builder()
                     .requireLensFacing(CameraSelector.LENS_FACING_BACK).build();
             camera = provider.bindToLifecycle(this, selector, preview, analysis);
+            // v4.8：连续自动对焦（此前完全没有对焦控制，Honor Play 等老机近距条码常常不合焦 →
+            // 画面发虚 → 「识别困难」。这里周期触发 AF/AE 测光对焦，并支持点按对焦。）
+            startAutoFocusLoop();
         } catch (Exception e) {
             finishWithError();
         }
+    }
+
+    private final android.os.Handler focusHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+
+    private void startAutoFocusLoop() {
+        focusHandler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (camera != null && !done.get()) focusAt(0.5f, 0.42f);
+                } catch (Throwable ignore) {}
+                if (!done.get() && !isFinishing()) focusHandler.postDelayed(this, 2200);
+            }
+        }, 700);
+    }
+
+    /** 在预览归一化坐标 (nx, ny) 处触发一次 AF/AE；不改动任何解码算法 */
+    private void focusAt(float nx, float ny) {
+        try {
+            if (camera == null || previewView == null) return;
+            MeteringPoint pt = previewView.getMeteringPointFactory().createPoint(nx, ny);
+            FocusMeteringAction action = new FocusMeteringAction.Builder(pt,
+                    FocusMeteringAction.FLAG_AF | FocusMeteringAction.FLAG_AE)
+                    .setAutoCancelDuration(2, java.util.concurrent.TimeUnit.SECONDS)
+                    .build();
+            camera.getCameraControl().startFocusAndMetering(action);
+        } catch (Throwable ignore) {}
     }
 
     // ---------- v4.6 解码管线：与网页端 zxing Worker 完全同款（实战验证版） ----------
@@ -437,6 +478,7 @@ public class BarcodeScannerActivity extends AppCompatActivity {
     protected void onDestroy() {
         super.onDestroy();
         if (overlay != null) overlay.stop();
+        try { focusHandler.removeCallbacksAndMessages(null); } catch (Throwable ignore) {}
         analysisExecutor.shutdown();
     }
 
@@ -451,7 +493,9 @@ public class BarcodeScannerActivity extends AppCompatActivity {
 
         public ScanOverlay(Context ctx) {
             super(ctx);
-            maskPaint.setColor(Color.parseColor("#88000000"));
+            // v4.8：遮罩淡化（原 #88000000 太重，框外画面几乎全黑，主观上「可识别区域很小」）。
+            // 淡遮罩后框外仍是可见画面，配合放大的取景框，Honor Play 等小屏老机对准明显轻松。
+            maskPaint.setColor(Color.parseColor("#4C000000"));
             linePaint.setColor(Color.parseColor("#4ADE80"));
             linePaint.setStrokeWidth(3f);
             cornerPaint.setColor(Color.parseColor("#4ADE80"));
@@ -479,8 +523,12 @@ public class BarcodeScannerActivity extends AppCompatActivity {
         protected void onLayout(boolean changed, int l, int t, int r, int b) {
             super.onLayout(changed, l, t, r, b);
             float w = r - l, h = b - t;
-            float ww = Math.min(w * 0.78f, 720f);
-            float wh = Math.min(ww * 0.5f, h * 0.5f);
+            // v4.8：取景框放大并适配小屏。解码始终基于完整 1920x1080 分析帧（不裁框内区域），
+            // 所以放大框只影响「对准确易度」，不会削弱识别力。
+            //  - 宽：屏幕宽的 88%（上限 880px，大屏不虚胖）
+            //  - 高：宽的 44%（更贴近一维码细长形状，同时保证小屏也有足够竖向空间）
+            float ww = Math.min(w * 0.88f, 880f);
+            float wh = Math.min(Math.max(ww * 0.44f, h * 0.28f), h * 0.46f);
             float cx = w / 2f, cy = h * 0.42f;
             win = new RectF(cx - ww / 2f, cy - wh / 2f, cx + ww / 2f, cy + wh / 2f);
         }
