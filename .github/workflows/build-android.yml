@@ -149,11 +149,11 @@ jobs:
               print("相机权限已存在，跳过")
           PYEOF
 
-      # 版本号升到 4.5（原生扫码版）：手机「设置-应用信息」里看到 4.5 = 确认装的是新包
-      - name: 版本号升为 4.5
+      # 版本号升到 4.6（原生扫码 v2：网页级解码管线 + 超时兜底）：手机「设置-应用信息」里看到 4.6 = 确认装的是新包
+      - name: 版本号升为 4.6
         run: |
-          sed -i -E 's/versionName "[0-9.]+"/versionName "4.5"/' android/app/build.gradle
-          sed -i -E 's/versionCode [0-9]+/versionCode 8/' android/app/build.gradle
+          sed -i -E 's/versionName "[0-9.]+"/versionName "4.6"/' android/app/build.gradle
+          sed -i -E 's/versionCode [0-9]+/versionCode 9/' android/app/build.gradle
           grep -n "versionName\|versionCode" android/app/build.gradle
 
       - name: Build debug APK
