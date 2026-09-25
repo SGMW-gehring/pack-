@@ -51,8 +51,14 @@ import java.util.concurrent.Executors;
  */
 public class PhotoShootActivity extends AppCompatActivity {
 
-    private static final int JPEG_QUALITY = 92;
+    private static final int JPEG_QUALITY = 88;
     private static final int CHUNK = 100000; // 单次 evaluateJavascript 字符数（Binder 事务上限约 1MB）
+    // v4.9.6：出图分辨率 1920×1440 → 1600×1200。
+    // 老机型（荣耀 Play / 4GB）在出图瞬间会同时存在「原图 + 旋转后」两张 bitmap（≈22MB），
+    // 加上 base64 回传与页面解码，容易被系统杀进程（表现为点快门闪退）。
+    // 1600×1200（192 万像素）与网页端归档尺寸一致，车间归档/水印完全够用。
+    private static final int OUT_W = 1600;
+    private static final int OUT_H = 1200;
 
     private PreviewView previewView;
     private ImageCapture imageCapture;
@@ -175,15 +181,17 @@ public class PhotoShootActivity extends AppCompatActivity {
                 Preview preview = new Preview.Builder().build();
                 preview.setSurfaceProvider(previewView.getSurfaceProvider());
 
-                imageCapture = new ImageCapture.Builder()
-                        .setTargetResolution(new Size(1920, 1440))
-                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                        .setJpegQuality(JPEG_QUALITY)
-                        .build();
-
                 CameraSelector selector = new CameraSelector.Builder()
                         .requireLensFacing(CameraSelector.LENS_FACING_BACK).build();
-                camera = provider.bindToLifecycle(this, selector, preview, imageCapture);
+                // v4.9.6：先按目标分辨率绑定；该组合本机不支持时（CameraX 在个别机型会抛异常），
+                // 回退到「不指定分辨率」再绑一次，避免直接失败/崩溃 → 仍可拍照
+                try {
+                    imageCapture = buildImageCapture(true);
+                    camera = provider.bindToLifecycle(this, selector, preview, imageCapture);
+                } catch (Throwable t) {
+                    imageCapture = buildImageCapture(false);
+                    camera = provider.bindToLifecycle(this, selector, preview, imageCapture);
+                }
                 // 连续自动对焦：与扫码页一致，避免近距发虚
                 ui.postDelayed(new Runnable() {
                     @Override
@@ -205,6 +213,14 @@ public class PhotoShootActivity extends AppCompatActivity {
                 finish();
             }
         }, ContextCompat.getMainExecutor(this));
+    }
+
+    private ImageCapture buildImageCapture(boolean withTargetResolution) {
+        ImageCapture.Builder b = new ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                .setJpegQuality(JPEG_QUALITY);
+        if (withTargetResolution) b.setTargetResolution(new Size(OUT_W, OUT_H));
+        return b.build();
     }
 
     private void takeShot() {
@@ -233,6 +249,10 @@ public class PhotoShootActivity extends AppCompatActivity {
                     }
                 } catch (Throwable ignore) {
                     b64 = null;
+                    // v4.9.6：内存不足时不要再留在拍照页反复尝试（老机型会连环崩），直接退出让页面回退系统相机
+                    if (ignore instanceof OutOfMemoryError) {
+                        runOnUiThread(() -> { PhotoShootBridge.deliver(cbId, null); finish(); });
+                    }
                 } finally {
                     try { image.close(); } catch (Throwable ignore) {}
                 }

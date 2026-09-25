@@ -12,22 +12,24 @@
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
   <link rel="icon" href="/icons/icon-192.png" />
-  <link rel="stylesheet" href="/style.css?v=29" />
+  <link rel="stylesheet" href="/style.css?v=41" />
 </head>
 <body>
   <!-- 单屏：全屏相机 + 覆盖层（识别/拍照共用同一摄像头） -->
   <section id="screen-main" class="main">
     <video id="cam" playsinline muted></video>
+    <!-- v4.3.1：原生相机预览层挂载点（@capacitor-community/camera-preview 方案①）；JS 动态夹在顶栏与底栏之间 -->
+    <div id="camPreview" style="display:none;"></div>
     <div id="flash" class="flash-anim"></div>
 
     <!-- 顶部覆盖栏 -->
     <header class="topbar">
       <div class="top-row">
-        <div class="conn-wrap"><span id="connDot" class="dot"></span><span id="connStatus" class="conn">连接中…</span></div>
+        <div class="conn-wrap"><span id="connDot" class="dot"></span><span id="connStatus" class="conn">连接中…</span><span class="ver-tag" title="网页端版本">v4.9.5</span></div>
         <div class="switches">
           <label class="sw-inline" title="拍一张立即传一张">
             <span>实时上传</span>
-            <button id="btnRealtime" class="switch sm" role="switch" aria-checked="false"><span class="knob"></span></button>
+            <button id="btnRealtime" class="switch sm" role="switch" aria-checked="true"><span class="knob"></span></button>
           </label>
           <label class="sw-inline" title="可选增强模式：对准追溯码持续后台识别（默认关，省电不发烫）">
             <span>自动识别</span>
@@ -39,12 +41,16 @@
           </label>
         </div>
       </div>
+      <!-- v4.9.2：追溯码与「查询照片」互换位置；追溯码独占一整行（flex-basis:100%+order），
+           整条码单行显示不折行（长码由 JS 自动降字号）；「查询照片」上移到拍摄者/工位同一行 -->
       <div class="chip-row">
         <button id="whoChip" class="chip">拍摄者：—</button>
         <button id="stationChip" class="chip">工位：—</button>
-        <button id="codeChip" class="chip code" title="点击复制追溯码">追溯码：未识别</button>
-        <button id="btnNewQr" class="chip ghost">更换追溯码</button>
         <a class="chip ghost" href="/gallery.html">查询照片</a>
+        <button id="btnNewQr" class="chip ghost">更换追溯码</button>
+        <button id="codeChip" class="chip code" title="点击复制追溯码">追溯码：未识别</button>
+        <!-- v4.9.5：实时上传进度从画面右上角移到这里（追溯码正下方、左对齐、带外框） -->
+        <div id="rtStatus" class="rt-chip" hidden></div>
       </div>
     </header>
 
@@ -53,8 +59,11 @@
       <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M7 2h10v3l-3.5 4v11a1.5 1.5 0 0 1-3 0V9L7 5V2zm2 2v.35L11.5 8v12h1V8L15 4.35V4H9z"/></svg>
     </button>
 
-    <!-- 实时上传状态 -->
-    <div id="rtStatus" class="rt-status"></div>
+    <!-- v4.9.4：拍照后画面区大图回显（v4.9.5：停留 4.5 秒；点击可立即关闭；定格识别弹窗打开时不叠加） -->
+    <div id="lastShot" class="last-shot">
+      <img id="lastShotImg" alt="刚拍的照片" />
+      <span class="ls-badge">已拍摄 · 点击关闭</span>
+    </div>
 
     <!-- 取景框引导（仅在识别模式显示） -->
     <div id="scanFrame" class="scan-frame">
@@ -76,24 +85,49 @@
       <div id="thumbs" class="thumb-strip"></div>
     </div>
 
-    <!-- 底部常驻操作栏：竖屏为网格（换追溯码在识别上方 / 计数在上传上方）；横屏为 识别|快门|上传 横排 -->
+    <!-- 底部常驻操作栏：竖屏网格两行（上排：换追溯码|快门|连拍；下排：识别|快门|上传）；
+         横屏为 换追溯码|识别|快门|连拍|上传 横排。
+         v4.9.2：0/20 计数合并进「上传」按钮内部（不再单独占一个格子） -->
     <div id="mainBar" class="capture-bar">
       <button id="btnNewQr2" class="bar-btn newqr2" aria-label="更换追溯码">更换追溯码</button>
-      <div id="countBadge" class="count-badge"><b id="photoCount">0</b>/20</div>
       <button id="btnScan" class="bar-btn" aria-label="识别追溯码">
         <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M3 5h4V3H3v2zm0 16h4v-2H3v2zm14-16h4V3h-4v2zm0 16h4v-2h-4v2zM7 7h10v10H7V7zm2 2v6h6V9H9z"/></svg>
         <span>识别追溯码</span>
       </button>
       <button id="btnShoot" class="btn shoot" aria-label="拍照">
-        <svg class="shutter-ring" viewBox="0 0 76 76">
-          <circle class="ring-bg" cx="38" cy="38" r="34"></circle>
-          <circle id="ringFg" class="ring-fg" cx="38" cy="38" r="34"></circle>
-        </svg>
-        <span class="shoot-core"></span>
+        <!-- v4.9.5：圆环与白色核心包一层，提示小字改为「同属按钮内部」的正常流元素，
+             这样小字紧贴快门、整体底边与旁边的按钮齐平，不再悬在栏外被安全区挡住 -->
+        <span class="shoot-circle">
+          <svg class="shutter-ring" viewBox="0 0 76 76">
+            <circle class="ring-bg" cx="38" cy="38" r="34"></circle>
+            <circle id="ringFg" class="ring-fg" cx="38" cy="38" r="34"></circle>
+          </svg>
+          <span class="shoot-core"></span>
+          <!-- v4.9.5：提示小字改为「公章式弧形环绕」—— 沿快门圆环上缘排布（像公章顶部那圈字），
+               每个字随弧微倾、字头朝弧外。--a 从 -100° 到 +100°（0° = 正上方），共 9 字完整原句；
+               纯 CSS 逐字定位：字号固定不随按钮缩放变小，老小屏也看得清；
+               旧缓存 HTML 没有这层时快门照常工作（只是没有提示文字），优雅降级。 -->
+          <span class="shoot-arc" aria-hidden="true">
+            <i style="--a:-100deg"><b>点</b></i>
+            <i style="--a:-75deg"><b>画</b></i>
+            <i style="--a:-50deg"><b>面</b></i>
+            <i style="--a:-25deg"><b>或</b></i>
+            <i style="--a:0deg"><b>此</b></i>
+            <i style="--a:25deg"><b>按</b></i>
+            <i style="--a:50deg"><b>钮</b></i>
+            <i style="--a:75deg"><b>拍</b></i>
+            <i style="--a:100deg"><b>照</b></i>
+          </span>
+        </span>
+      </button>
+      <button id="btnBurst" class="bar-btn burst" aria-label="连拍">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M8 3h8v2H8zM6 7h12v2H6zM4 11h16v10H4V11zm2 2v6h12v-6H6z"/></svg>
+        <span>连拍×3</span>
       </button>
       <button id="btnUpload" class="bar-btn upload" disabled>
         <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 3l5 5h-3v6h-4V8H7l5-5zM5 18h14v2H5v-2z"/></svg>
         <span id="uploadLabel">上传</span>
+        <span id="countBadge" class="count-badge"><b id="photoCount">0</b>/<span id="countTarget">20</span></span>
       </button>
     </div>
   </section>
@@ -133,6 +167,22 @@
     </div>
   </div>
 
+  <!-- v4.9.2：开启「自动识别」前的告知弹层（持续解码＝耗电快、容易发烫），确认后才真正开启 -->
+  <div id="autoScanModal" class="modal">
+    <div class="modal-card">
+      <h3>开启自动识别？</h3>
+      <p class="hint warn-text">
+        自动识别会让摄像头<span class="hl">一直不停地解码</span>，<br />
+        <span class="hl">耗电快，手机容易发烫</span>，长时间用还可能被系统降频变卡。<br />
+        建议保持关闭：对准条码点「识别追溯码」（或拍照时自动识别，单次解码几乎不发热）。
+      </p>
+      <div class="modal-actions">
+        <button id="autoScanCancel" class="btn ghost">保持关闭</button>
+        <button id="autoScanOk" class="btn primary">仍要开启</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 定格识别弹层：拍一张固定在页面上供识别（可看清拍到了什么，失败可原地重拍） -->
   <div id="freezeModal" class="modal">
     <div class="modal-card freeze-card">
@@ -152,6 +202,6 @@
   <script src="/lib/jsqr.js"></script>
   <script src="/lib/zxing.js"></script>
   <script src="/lib/tesseract/tesseract.min.js"></script>
-  <script src="/app.js?v=29"></script>
+  <script src="/app.js?v=43"></script>
 </body>
 </html>

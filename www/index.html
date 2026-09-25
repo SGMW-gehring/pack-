@@ -688,15 +688,34 @@
     var ok = await probe(u, 2500);
     setStatus(ok ? '已连接：' + u + '，点下方按钮开始扫码' : '当前地址不通，请点“自动探测”或“搜索本网段”', ok ? 'ok' : 'bad');
   })();
-})();
 
-// v4.8：启动页底部版本标识——装机后在「打开相机扫码」前一眼确认装的是哪个包，
+  // v4.8：启动页底部版本标识——装机后在「打开相机扫码」前一眼确认装的是哪个包，
 // 与 NAS 上传页顶栏的版本号对得上才算两端同步（避免只更新一端导致的现象对不上）。
+// v4.9.5：改为「App vX · NAS vX」双端对照 —— NAS 版本从 /api/health 实时取，
+// 即使 APK 没重打也能立刻看出「服务端已升级、App 壳还是旧的」，不再靠猜。
 (function () {
+  var APP_VER = '4.9.5'; // 与 NAS/public/index.html 的 ver-tag、server.js 的 APP_VERSION 保持一致
   var t = document.createElement('div');
-  t.textContent = 'App v4.8';
+  t.textContent = 'App v' + APP_VER + ' · NAS 检测中…';
   t.style.cssText = 'position:fixed;left:0;right:0;bottom:6px;text-align:center;color:#8b93a5;font-size:11px;opacity:.75;pointer-events:none;z-index:9;';
   document.body.appendChild(t);
+  try {
+    var base = getUrl();
+    if (!base) return;
+    var done = false;
+    var timer = setTimeout(function () { if (!done) { done = true; t.textContent = 'App v' + APP_VER + ' · NAS 未连接'; } }, 3000);
+    fetch(base + '/api/health?t=' + Date.now(), { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        if (done) return; done = true; clearTimeout(timer);
+        var nv = (j && j.version) ? String(j.version) : '未知';
+        var same = nv === APP_VER;
+        t.textContent = 'App v' + APP_VER + ' · NAS v' + nv + (same ? '' : '（版本不一致，请更新对应一端）');
+        t.style.color = same ? '#8b93a5' : '#ffb020';
+      })
+      .catch(function () { if (!done) { done = true; clearTimeout(timer); t.textContent = 'App v' + APP_VER + ' · NAS 未连接'; } });
+  } catch (e) { /* 拿不到地址就只显示 App 版本 */ }
+  })();
 })();
 </script>
 </body>

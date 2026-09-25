@@ -48,8 +48,14 @@
   // 单张原图下载：走 /api/photo?file=..&qr=..&download=1，服务端返回附件头。
   // 注意：不能用「程序合成 a.click()+download 属性」——夸克/微信X5/UC 等内核会静默拦截，
   // 表现就是点了没反应。改为直接跳转该 URL：服务端 attachment 头会让浏览器原地下载，不离开页面。
+  // v4.4：带 name 参数让下载文件名恢复为「追溯码_拍摄时间_第N张.jpg」这种可读默认名（而非 pN.jpg）。
+  function buildDlName(it) {
+    const ts = (it.capturedAt || '').replace(/[:\s]/g, '-');
+    return (it.qr || 'photo') + '_' + ts + '_第' + (it.seq || 0) + '张.jpg';
+  }
   function downloadOne(it) {
-    const url = '/api/photo?file=' + encodeURIComponent(it.file) + '&qr=' + encodeURIComponent(it.qr) + '&download=1';
+    const url = '/api/photo?file=' + encodeURIComponent(it.file) + '&qr=' + encodeURIComponent(it.qr) +
+      '&download=1&name=' + encodeURIComponent(buildDlName(it));
     window.location.href = url;
   }
 
@@ -83,7 +89,8 @@
 
   function openLightbox(it) {
     $('lbImg').src = it.url;
-    $('lbDl').href = '/api/photo?file=' + encodeURIComponent(it.file) + '&qr=' + encodeURIComponent(it.qr) + '&download=1';
+    $('lbDl').href = '/api/photo?file=' + encodeURIComponent(it.file) + '&qr=' + encodeURIComponent(it.qr) +
+      '&download=1&name=' + encodeURIComponent((it.qr || 'photo') + '_' + (it.capturedAt || '').replace(/[:\s]/g, '-') + '_第' + (it.seq || 0) + '张.jpg');
     $('lbInfo').innerHTML =
       '<b>追溯码：</b>' + it.qr + '<br>' +
       '<b>拍摄时间：</b>' + (it.capturedAt || '—') + '<br>' +

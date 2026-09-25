@@ -23,10 +23,16 @@ appendUserAgent: ' PhotoUploaderShell/1.0'
 package.json                                （根目录）
 capacitor.config.ts                         （根目录，含 appendUserAgent）
 tsconfig.json
-.github/workflows/build-android.yml
+.github/workflows/build-android.yml         （隐藏目录！别漏）
 www/index.html                              （含 serverDecode 双引擎）
+native/*.java                               （v4.8 起必须！漏推 = 拍照要按「确定」、不能连拍）
+  ├─ BarcodeScannerBridge.java / BarcodeScannerActivity.java
+  └─ PhotoShootBridge.java / PhotoShootActivity.java
 NAS_WEB_PATCH/                              （可选，备查，不参与构建）
 ```
+
+> 最省事的做法：**整目录打包后解压到仓库根目录**（`App/` 里的东西直接放仓库根，不要再套一层 `App/`）。
+> 现在交付的 `photo-uploader-v4.8-App源码包.zip` 就是这种结构，解压即用。
 
 ### 命令行推法（有仓库权限时）
 ```bash
