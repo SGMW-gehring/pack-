@@ -50,6 +50,8 @@ jobs:
           # v4.8：原生拍照页（连拍、无系统相机「确定」步骤）
           cp native/PhotoShootBridge.java "$DST/"
           cp native/PhotoShootActivity.java "$DST/"
+          # v4.9.7：App 控制桥（启动页「关闭」按钮真正退出 App）
+          cp native/AppControlBridge.java "$DST/"
           ls -l "$DST"
 
       - name: Sync native
@@ -107,6 +109,9 @@ jobs:
                 // 拍完直接回传图片给页面，不再经过系统相机的「确定」步骤
                 PhotoShootBridge.bind(this);
                 this.bridge.getWebView().addJavascriptInterface(new PhotoShootBridge(), "PhotoShootNative");
+                // v4.9.7：App 控制桥接 —— 启动页「关闭」按钮调 window.AppControlNative._exit() 真正退出
+                AppControlBridge.bind(this);
+                this.bridge.getWebView().addJavascriptInterface(new AppControlBridge(), "AppControlNative");
               }
             }
           '''
@@ -136,6 +141,17 @@ jobs:
           # ③ Manifest 注册扫码 Activity
           m = 'android/app/src/main/AndroidManifest.xml'
           ms = open(m, encoding='utf-8').read()
+
+          # ③-a v4.9.7：申请更大的堆（老机型荣耀 Play 在「原图解码 + 旋转 + JPEG 压缩」这一步
+          # 峰值内存超过默认堆上限会被系统直接杀掉，表现为点快门闪退）。
+          # 为专用作业 App 多要点内存是可接受的，配合拍照页 1600×1200（低内存机 1280×960）出图。
+          if 'android:largeHeap' not in ms:
+              ms = re.sub(r'<application\b', '<application android:largeHeap="true"', ms, count=1)
+              open(m, 'w', encoding='utf-8').write(ms)
+              print("已开启 android:largeHeap=true")
+          else:
+              print("largeHeap 已存在，跳过")
+
           if 'BarcodeScannerActivity' not in ms:
               ms = re.sub(r'(<application[^>]*>)',
                   r'\1\n        <activity android:name=".BarcodeScannerActivity" android:exported="false" android:screenOrientation="portrait" android:theme="@style/Theme.AppCompat.NoActionBar" android:hardwareAccelerated="true" android:configChanges="orientation|screenSize|keyboardHidden" />',
@@ -168,12 +184,12 @@ jobs:
               print("相机权限已存在，跳过")
           PYEOF
 
-          # 版本号升到 4.8（原生拍照页连拍 + 扫码取景框放大/自动对焦 + 小屏适配）：
-      # 手机「设置-应用信息」里看到 4.8 = 确认装的是新包
-      - name: 版本号升为 4.8
+          # 版本号：手机「设置-应用信息」里看到 4.9.7 = 确认装的是新包
+      # v4.9.7：原生拍照页版面重做（背景透明/条码不截断/完成与快门同排/印章弧字）+ 启动页关闭按钮
+      - name: 版本号升为 4.9.7
         run: |
-          sed -i -E 's/versionName "[0-9.]+"/versionName "4.8"/' android/app/build.gradle
-          sed -i -E 's/versionCode [0-9]+/versionCode 11/' android/app/build.gradle
+          sed -i -E 's/versionName "[0-9.]+"/versionName "4.9.7"/' android/app/build.gradle
+          sed -i -E 's/versionCode [0-9]+/versionCode 13/' android/app/build.gradle
           grep -n "versionName\|versionCode" android/app/build.gradle
 
       - name: Build debug APK
