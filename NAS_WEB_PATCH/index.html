@@ -12,7 +12,7 @@
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
   <link rel="icon" href="/icons/icon-192.png" />
-  <link rel="stylesheet" href="/style.css?v=41" />
+  <link rel="stylesheet" href="/style.css?v=45" />
 </head>
 <body>
   <!-- 单屏：全屏相机 + 覆盖层（识别/拍照共用同一摄像头） -->
@@ -25,7 +25,7 @@
     <!-- 顶部覆盖栏 -->
     <header class="topbar">
       <div class="top-row">
-        <div class="conn-wrap"><span id="connDot" class="dot"></span><span id="connStatus" class="conn">连接中…</span><span class="ver-tag" title="网页端版本">v4.9.5</span></div>
+        <div class="conn-wrap"><span id="connDot" class="dot"></span><span id="connStatus" class="conn">连接中…</span><span class="ver-tag" title="网页端版本">v4.9.7</span></div>
         <div class="switches">
           <label class="sw-inline" title="拍一张立即传一张">
             <span>实时上传</span>
@@ -183,6 +183,24 @@
     </div>
   </div>
 
+  <!-- v4.9.7：关闭「水印」前的告知弹层。
+       之前点开关只有一个一闪而过的 toast，用户以为"点了没反应/没提示"；
+       与「自动识别」保持一致：先弹层说明后果，明确「保持开启」或「仍要关闭」。 -->
+  <div id="watermarkModal" class="modal">
+    <div class="modal-card">
+      <h3>关闭水印？</h3>
+      <p class="hint warn-text">
+        关闭后照片底部<span class="hl">不再烧入追溯码 / 拍摄者 / 工位 / 时间</span>，<br />
+        照片一旦离开本机，就<span class="hl">无法再追溯到人和工位</span>。<br />
+        建议保持开启（水印不影响上传速度，也不影响识别）。
+      </p>
+      <div class="modal-actions">
+        <button id="wmCancel" class="btn ghost">保持开启</button>
+        <button id="wmOk" class="btn danger">仍要关闭</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 定格识别弹层：拍一张固定在页面上供识别（可看清拍到了什么，失败可原地重拍） -->
   <div id="freezeModal" class="modal">
     <div class="modal-card freeze-card">
@@ -202,6 +220,6 @@
   <script src="/lib/jsqr.js"></script>
   <script src="/lib/zxing.js"></script>
   <script src="/lib/tesseract/tesseract.min.js"></script>
-  <script src="/app.js?v=43"></script>
+  <script src="/app.js?v=45"></script>
 </body>
 </html>

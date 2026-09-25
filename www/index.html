@@ -28,6 +28,11 @@
   .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
   .chip { font-size:12px; padding:6px 10px; border-radius: 999px; background:#0c0e13; border:1px solid var(--line); color:var(--sub); }
   .chip.on { border-color: var(--brand); color: var(--txt); }
+  /* v4.9.7：右上角「关闭」按钮 —— 此前 App 只能靠系统返回键/最近任务划掉，现场换人、卡住时很不方便 */
+  #btnExit { position:fixed; z-index:20; top:calc(10px + env(safe-area-inset-top)); right:12px;
+    width:34px; height:34px; min-width:0; padding:0; flex:none; line-height:1; font-size:15px;
+    border-radius:50%; background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.28); color:#fff; }
+  #btnExit:active { background:rgba(0,0,0,.6); }
   /* 识别中遮罩 */
   #scanui { display:none; position: fixed; inset: 0; z-index: 9; background: rgba(0,0,0,.72);
     align-items:center; justify-content:center; flex-direction:column; gap:14px; }
@@ -65,9 +70,12 @@
 </head>
 <body>
 
+<button id="btnExit" type="button" aria-label="关闭应用" title="关闭应用">✕</button>
+
 <div id="app">
   <h1>照片追溯上传</h1>
-  <div class="sub">实时取景连续扫码（Worker 后台解码）+ 原生相机拍照 + NAS 服务端双引擎 · NAS 地址可随时改，无需重新打包</div>
+  <!-- v4.9.7：原说明行（实时取景连续扫码…无需重新打包）按反馈移除 —— 现场只看地址和扫码按钮，
+       这行技术说明对使用者没有意义，反而把首屏撑高、把「打开相机扫码」挤下去 -->
 
   <div class="card">
     <label for="url">NAS 地址（App 直连端口 3080）</label>
@@ -672,6 +680,18 @@
     }
   };
   $('lvClose').onclick = function () { stopLive(); setStatus('已退出扫码'); };
+  // v4.9.7：关闭按钮 —— 优先走原生桥（真正退出进程）；旧包/浏览器里没有桥则降级 window.close()，
+  // 仍关不掉时明确告诉用户用系统返回键，避免出现「点了没反应」
+  $('btnExit').onclick = function () {
+    try {
+      if (window.AppControlNative && window.AppControlNative._exit) {
+        window.AppControlNative._exit();
+        return;
+      }
+    } catch (e) {}
+    try { window.close(); } catch (e) {}
+    setStatus('如未退出，请用系统返回键或从最近任务划掉（旧版 App 无退出接口）', '');
+  };
   $('lvPhoto').onclick = function () { stopLive(); startScan(); }; // 实时识别不动时改拍一张
   $('lvTorch').onclick = function () { toggleTorch(); };
   window.addEventListener('pagehide', stopLive);
@@ -694,7 +714,7 @@
 // v4.9.5：改为「App vX · NAS vX」双端对照 —— NAS 版本从 /api/health 实时取，
 // 即使 APK 没重打也能立刻看出「服务端已升级、App 壳还是旧的」，不再靠猜。
 (function () {
-  var APP_VER = '4.9.5'; // 与 NAS/public/index.html 的 ver-tag、server.js 的 APP_VERSION 保持一致
+  var APP_VER = '4.9.7'; // 与 NAS/public/index.html 的 ver-tag、server.js 的 APP_VERSION 保持一致
   var t = document.createElement('div');
   t.textContent = 'App v' + APP_VER + ' · NAS 检测中…';
   t.style.cssText = 'position:fixed;left:0;right:0;bottom:6px;text-align:center;color:#8b93a5;font-size:11px;opacity:.75;pointer-events:none;z-index:9;';

@@ -66,7 +66,12 @@
     function clearPending() {
       return getAll().then((recs) => Promise.all(recs.filter((r) => !r.uploaded).map((r) => del(r.id))));
     }
-    return { put, getAll, del, clearPending, available: typeof indexedDB !== 'undefined' };
+    // v4.9.7：整组清空（含已上传记录）。「拍完一组 → 上传完毕 → 启动下一组」时调用，
+    // 保证手机里不再残留上一组的任何副本（此前只清未上传的，已上传的大图会一直躺在本机库里）
+    function clearAll() {
+      return getAll().then((recs) => Promise.all(recs.map((r) => del(r.id))));
+    }
+    return { put, getAll, del, clearPending, clearAll, available: typeof indexedDB !== 'undefined' };
   })();
 
   // ---------- DOM ----------
@@ -306,7 +311,11 @@
   //   功能不缺（照片、水印、追溯码、上传全都一样），只是系统相机多一步「确定」。
   // 触发（都记在 localStorage，纯网页端生效，默认行为完全不变）：
   //   ① 手动：访问 ?noshoot=1（长期生效），?noshoot=0 恢复
-  //   ② 自动：连续两次「进了原生拍照页却没回传任何照片」→ 判定不兼容，自动降级并提示
+  //   ② 自动：只要出现一次「进了原生拍照页却没回传任何照片」→ 判定不兼容，自动降级并提示
+  // v4.9.7：阈值由「连续两次」改成「一次就跳」。荣耀 Play 实测是**一进拍照页就崩**
+  //   （CameraX 在这台机上起不来，Java 层 try/catch 抓不住，进程直接没），
+  //   属于确定性崩溃而非偶发 —— 让用户崩两次才降级没有意义，崩一次就永久跳过。
+  //   想再试（换了 ROM / 想验证）：双击网页右上角版本号，或访问 ?noshoot=0。
   const NS_SKIP_KEY = 'pu_skip_nativeshoot';
   const NS_FAIL_KEY = 'pu_nativeshoot_fail';
   const NS_ENTER_KEY = 'pu_nativeshoot_enter';
@@ -320,9 +329,15 @@
         localStorage.removeItem(NS_ENTER_KEY);
         const n = (parseInt(localStorage.getItem(NS_FAIL_KEY) || '0', 10) || 0) + 1;
         localStorage.setItem(NS_FAIL_KEY, String(n));
-        if (n >= 2 && localStorage.getItem(NS_SKIP_KEY) !== '1') {
+        // v4.9.7：一次即跳（原为 n >= 2）。崩一次就说明这台机进不了原生拍照页，没必要再崩第二次
+        if (n >= 1 && localStorage.getItem(NS_SKIP_KEY) !== '1') {
           localStorage.setItem(NS_SKIP_KEY, '1');
-          try { toast('检测到本机原生拍照页异常，已自动改用「页内预览/系统相机」拍照'); } catch (_) {}
+          // 延后 1.5s 再提示：启动阶段还有别的提示（拍照就绪等）会把它顶掉，用户就看不到原因了
+          try {
+            setTimeout(() => {
+              try { toast('检测到本机进原生拍照页会闪退，已自动改用系统相机拍照（想再试可双击右上角版本号）', { duration: 5000 }); } catch (_) {}
+            }, 1500);
+          } catch (_) {}
         }
       }
     } catch (e) {}
@@ -551,6 +566,20 @@
   // 原来是 4096 —— 等于几乎不缩小：4000×3000 原图解码 48MB + 画布再一份 48MB + 水印 + toBlob，
   // 峰值 150MB+，老机型（荣耀 Play / 4GB）会在这一步被系统杀进程，表现为「点快门闪退」。
   // 车间归档 1600×1200（192 万像素）完全够用，上传也更快。可用 ?maxedge=1200 再降一档。
+  //
+  // v4.9.7：再加一层「闪退自动降档」。荣耀 Play 这类机型即使 1600 仍可能被杀，
+  // 靠人工记 URL 参数不现实 —— 改成：处理照片前置标记，处理完清除；下次开页面若标记还在，
+  // 说明上次是在处理照片时被打死的，记一次崩溃并把出图边长降一档（1600 → 1200 → 1000）。
+  // ⚠️ 只作用于「落库/上传的照片尺寸」，识别链路（框内抓帧 + 全帧兜底 + 服务端解码 + OCR）
+  //    不从这张照片取码，因此不影响识别能力。
+  const CRASH_KEY = 'pu_crash_n';
+  const BUSY_KEY = 'pu_shot_busy';
+  function crashLevel() {
+    try { return Math.max(0, Math.min(2, parseInt(localStorage.getItem(CRASH_KEY) || '0', 10) || 0)); } catch (e) { return 0; }
+  }
+  function markShotBusy() { try { localStorage.setItem(BUSY_KEY, '1'); } catch (e) {} }
+  function clearShotBusy() { try { localStorage.removeItem(BUSY_KEY); } catch (e) {} }
+
   function photoMaxEdge() {
     try {
       const p = parseInt(new URLSearchParams(location.search).get('maxedge'), 10);
@@ -558,7 +587,8 @@
       const s = parseInt(localStorage.getItem('pu_photo_maxedge') || '0', 10);
       if (s >= 800 && s <= 4096) return s;
     } catch (e) {}
-    return 1600;
+    const lvl = crashLevel();
+    return lvl === 0 ? 1600 : (lvl === 1 ? 1200 : 1000);
   }
 
   async function shootFromFile(file) {
@@ -597,12 +627,13 @@
 
   // 从画布出片（原 shoot 后半段抽取，实时流与系统相机共用同一落库/上传管线）
   async function addCapturedPhoto(canvas) {
+    markShotBusy(); // v4.9.7：标记「正在处理照片」，正常收尾会清掉；残留在下次开页面时即判为上次闪退
     const seq = ++state.seq;
     const qrForMark = state.qr;
     if (state.watermark) drawWatermark(canvas, seq, qrForMark);
     shutterFeedback();
     const blob = await encodeJpeg(canvas, 1 * 1024 * 1024, 2 * 1024 * 1024);
-    if (!blob) { toast('拍照失败，请重试'); return; }
+    if (!blob) { clearShotBusy(); toast('拍照失败，请重试'); return; }
     const thumb = await makeThumb(canvas, 320); // 随照片上传，供检索页缩略图网格
     const url = URL.createObjectURL(blob);
     const p = { blob, url, thumb, capturedAt: new Date().toISOString(), seq, qr: qrForMark, photographer: state.photographer, workstation: state.workstation, uploaded: false, uploading: false, failed: false, dbId: null };
@@ -612,13 +643,17 @@
         id: 'p_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
         qr: qrForMark, photographer: state.photographer, workstation: state.workstation, capturedAt: p.capturedAt, seq, blob, thumb, uploaded: false, serverPath: '',
       };
-      DB.put(rec).then((r) => { p.dbId = r.id; }).catch(() => {});
+      // v4.9.7：dbId 同步赋值（原来等 put 完成后才填）。实时上传几乎与落库同时发生，
+      // 异步回填会让「上传成功 → 删除本机副本」找不到 id，副本就一直躺在手机里删不掉。
+      p.dbId = rec.id;
+      DB.put(rec).catch(() => {});
     }
     state.photos.push(p);
     renderThumbs(true);
     const f = $('flash');
     f.classList.remove('on'); void f.offsetWidth; f.classList.add('on');
     showLastShot(p.url); // v4.9.4：画面区回显刚拍的照片，确认"拍到了"
+    clearShotBusy(); // v4.9.7：本张处理完毕，撤销闪退标记
     // 实时上传：已识别立即传
     if (state.realtime) uploadOne(p);
   }
@@ -1373,7 +1408,8 @@
   // 重新开始（换追溯码）：清空本组。v22 不再持续轮询（发烫根因），改为「直接拍照即自动识别」或点「识别」。
   function restartScan() {
     state.photos.forEach((p) => { if (p.url) URL.revokeObjectURL(p.url); });
-    if (DB.available) DB.clearPending().catch(() => {}); // 放弃本组：清掉未上传的暂存记录
+    // v4.9.7：启动下一组 = 本机上一组的照片副本整组清空（含已上传记录），手机里不再残留
+    if (DB.available) DB.clearAll().catch(() => {});
     state.photos = [];
     state.seq = 0;
     state.qr = null;
@@ -1386,7 +1422,7 @@
     autoScan = false;
     const a = $('btnAutoScan'); if (a) a.setAttribute('aria-checked', 'false');
     // 提示用户：无需先扫描，直接拍照即可后台识别追溯码；或点「识别」/「手动输入」
-    toast('已换追溯码：直接拍照将自动识别，或点「识别」');
+    toast('已换追溯码：上一组本机照片已清理，直接拍照即可开新一组');
     // v4.3：兜底清掉可能卡死的按钮态（识别键若此前中途异常会停在 disabled），换码即重置
     const bs = $('btnScan'); if (bs) bs.disabled = false;
     const bo = $('btnOcr'); if (bo) bo.disabled = false;
@@ -1717,9 +1753,10 @@
       let d = null; try { d = JSON.parse(xhr.responseText); } catch (e) { d = null; }
       p.uploaded = !!(xhr.status >= 200 && xhr.status < 300 && d && d.ok);
       if (!p.uploaded) p.failed = true;
-      if (p.uploaded && p.dbId) {
-        DB.put({ id: p.dbId, qr: p.qr || state.qr, photographer: p.photographer || state.photographer, workstation: p.workstation || '', capturedAt: p.capturedAt, seq: p.seq, blob: p.blob, uploaded: true }).catch(() => {});
-      }
+      // v4.9.7：以前这里是把整张原图「连 blob 一起」回写成 uploaded:true 存回本机库
+      // —— 已上传的大图从此永久躺在手机里（换组时 clearPending 又只清未上传的，删不掉）。
+      // 现在统一走 markUploaded：顺手删掉本机副本，手机里不再留已上传的照片。
+      if (p.uploaded) markUploaded(p);
       renderThumbs();
       if (p.uploaded) { try { navigator.vibrate && navigator.vibrate(15); } catch (e) {} }
     };
@@ -1738,9 +1775,11 @@
   // 标记某张为已上传（内存 + IndexedDB 同步）
   function markUploaded(p) {
     p.uploaded = true; p.failed = false; p.uploading = false;
-    if (p.dbId) {
-      DB.put({ id: p.dbId, qr: p.qr || state.qr, photographer: p.photographer || state.photographer, workstation: p.workstation || '', capturedAt: p.capturedAt, seq: p.seq, blob: p.blob, uploaded: true }).catch(() => {});
-    }
+    // v4.9.7：上传成功即删掉本机 IndexedDB 里的整张原图副本。
+    // 单张 1~2MB，一组十几张就是几十 MB 长期躺在本机 —— 照片已在 NAS 落库，本机再留一份毫无意义。
+    // 界面缩略图走 p.url / p.thumb（仍在内存，观感完全不变），刷新后也不再把这些已传照片恢复回来。
+    if (p.dbId) { const id = p.dbId; p.dbId = null; try { DB.del(id); } catch (e) {} }
+    try { p.blob = null; } catch (e) {}
   }
 
   // 失败重试：把失败且未上传的项重新发起上传（网络恢复时自动调用，也可手动点）
@@ -1779,7 +1818,8 @@
       if (xhr.status >= 200 && xhr.status < 300 && d.ok) {
         pending.forEach((p) => markUploaded(p));
         renderThumbs();
-        toast(`✅ 已上传 ${d.count} 张到飞牛NAS`);
+        // v4.9.7：明确告知本机副本已释放、下一组怎么开（此前用户不知道照片还留在手机里）
+        toast(`✅ 已上传 ${d.count} 张到飞牛NAS（本机副本已释放，点「更换追溯码」开下一组）`);
         try { navigator.vibrate && navigator.vibrate([40, 60, 40]); } catch (e) {}
       } else {
         // 服务端返回逐张结果：精确标记成功/失败，失败的可稍后重试（绝不静默丢弃）
@@ -1873,22 +1913,10 @@
       updateRealtimeStatus();
       toast(state.realtime ? '已开启实时上传：每拍一张立即上传' : '已关闭实时上传');
     });
-    // v4.9.3：自动识别开关与弹窗按钮改用「事件委托」独立绑定（见启动区 bindAllAutoScan），
-    // 不再依赖 bind() 顺序执行 —— 即使前面某个绑定抛了异常，这里照样能弹。
-    $('btnWatermark').addEventListener('click', () => {
-      const next = !state.watermark;
-      // 关闭水印需先填写拍摄者姓名（责任可追溯）：未填则弹窗要求填写，并强制保持水印开启
-      if (!next && !state.photographer) {
-        toast('关闭水印需先填写拍摄者姓名');
-        openWhoModal();
-        $('btnWatermark').setAttribute('aria-checked', 'true');
-        return;
-      }
-      state.watermark = next;
-      localStorage.setItem('watermark', state.watermark ? '1' : '0');
-      $('btnWatermark').setAttribute('aria-checked', state.watermark ? 'true' : 'false');
-      toast(state.watermark ? '已开启水印：照片底部显示追溯码/拍摄者/工位/时间' : '已关闭水印');
-    });
+    // v4.9.7：水印开关整体移到启动区的「事件委托」（见 bindAllAutoScan）。
+    // 真机反馈「关闭水印按钮还是无提示」——留在 bind() 里一旦前面任一个绑定抛异常，
+    // 后面整段都会失效（按钮静默无反应）。委托层只要页面活着就一定响应，
+    // 并且关闭水印改为先弹确认层（与「自动识别」一致），不再只是一闪而过的 toast。
     // v4.4：换追溯码后自动接续「识别」，把「换码 + 识别」两步合成一步，点一次即开相机扫新码
     function afterChangeCode() {
       restartScan();
@@ -2006,6 +2034,21 @@
   }
 
   // ---------- 启动 ----------
+  // v4.9.7：上次是否在「处理照片」途中被系统杀掉（老机型闪退）→ 自动降一档出图尺寸。
+  // 这是纯自救逻辑：不改任何既有行为，只在真的崩过之后才降档，并明确告知用户降到多少。
+  (function detectLastCrash() {
+    try {
+      if (localStorage.getItem(BUSY_KEY) !== '1') return;
+      localStorage.removeItem(BUSY_KEY);
+      const n = Math.min(2, crashLevel() + 1);
+      localStorage.setItem(CRASH_KEY, String(n));
+      const edge = photoMaxEdge();
+      setTimeout(() => {
+        try { toast(`上次拍照时被系统中断，已自动把照片尺寸降到 ${edge}px（更省内存，连拍更稳）`); } catch (e) {}
+      }, 900);
+    } catch (e) {}
+  })();
+
   // v4.9.3：自动识别弹窗改为「document 捕获层事件委托」，独立于 bind() 存在。
   // 真机上若 bind() 中途抛异常（某个绑定失败会让后面的绑定全部失效），开关就会"点了没反应"；
   // 委托只要页面活着就一定响应，并且任何异常都被 catch 住，不允许拖垮页面。
@@ -2017,6 +2060,35 @@
         if (t.closest('#btnAutoScan')) { toggleAutoScan(); return; }
         if (t.closest('#autoScanCancel')) { hideModal('autoScanModal'); setAutoScan(false, true); return; }
         if (t.closest('#autoScanOk')) { hideModal('autoScanModal'); setAutoScan(true); return; }
+        // v4.9.7：水印开关（关闭前先弹层确认；开启即时生效并 toast）
+        if (t.closest('#btnWatermark')) {
+          const next = !state.watermark;
+          if (next) { // 开启：直接生效
+            state.watermark = true;
+            localStorage.setItem('watermark', '1');
+            $('btnWatermark').setAttribute('aria-checked', 'true');
+            toast('已开启水印：照片底部显示追溯码/拍摄者/工位/时间');
+            return;
+          }
+          // 关闭：先要拍摄者姓名（责任可追溯），再弹确认层
+          if (!state.photographer) {
+            toast('关闭水印需先填写拍摄者姓名');
+            openWhoModal();
+            $('btnWatermark').setAttribute('aria-checked', 'true');
+            return;
+          }
+          showModal('watermarkModal');
+          return;
+        }
+        if (t.closest('#wmCancel')) { hideModal('watermarkModal'); toast('已保持开启水印'); return; }
+        if (t.closest('#wmOk')) {
+          hideModal('watermarkModal');
+          state.watermark = false;
+          localStorage.setItem('watermark', '0');
+          $('btnWatermark').setAttribute('aria-checked', 'false');
+          toast('已关闭水印：照片不再烧入追溯码/拍摄者/工位/时间');
+          return;
+        }
         if (t.closest('#lastShot')) hideLastShot(); // v4.9.4：点击回显层立即关闭
       } catch (err) { /* 保险丝：不外溢 */ }
     }, true);

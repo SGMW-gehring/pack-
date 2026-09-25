@@ -256,6 +256,18 @@ public class BarcodeScannerActivity extends AppCompatActivity {
 
     private final android.os.Handler focusHandler = new android.os.Handler(android.os.Looper.getMainLooper());
 
+    /**
+     * v4.9.7：改成「触发一次、持续对焦」，不再周期重触发。
+     *
+     * 原写法的问题（真机反馈「识别条码时相机一直变焦」）：
+     *   每 2.2s 触发一次 AF，且每次都带 setAutoCancelDuration(2s) ——
+     *   2 秒后被系统自动取消 → 对焦状态回退 → 2.2s 后再重新搜索 →
+     *   形成「重搜 → 取消 → 重搜」的死循环，画面就是一直在拉风箱，看起来永远合不了焦。
+     *
+     * 正确做法：不带 autoCancelDuration 的 FocusMeteringAction 会**持续**运行 AF/AE（等价连续对焦），
+     * 只需要触发一次即可一直保持，合焦更快、画面稳定不跳。
+     * 点按画面仍可手动改对焦点（focusAt），同样不带 autoCancel，避免手动对焦后 3 秒又失焦。
+     */
     private void startAutoFocusLoop() {
         focusHandler.postDelayed(new Runnable() {
             @Override
@@ -263,7 +275,7 @@ public class BarcodeScannerActivity extends AppCompatActivity {
                 try {
                     if (camera != null && !done.get()) focusAt(0.5f, 0.42f);
                 } catch (Throwable ignore) {}
-                if (!done.get() && !isFinishing()) focusHandler.postDelayed(this, 2200);
+                // 不再周期重触发：一次触发即为持续对焦（见上）
             }
         }, 700);
     }
@@ -273,9 +285,10 @@ public class BarcodeScannerActivity extends AppCompatActivity {
         try {
             if (camera == null || previewView == null) return;
             MeteringPoint pt = previewView.getMeteringPointFactory().createPoint(nx, ny);
+            // v4.9.7：去掉 setAutoCancelDuration —— 保留它就会 2 秒后取消对焦并回退，
+            // 这正是「一直变焦」的根因；不带它则 AF/AE 持续生效（连续对焦）
             FocusMeteringAction action = new FocusMeteringAction.Builder(pt,
                     FocusMeteringAction.FLAG_AF | FocusMeteringAction.FLAG_AE)
-                    .setAutoCancelDuration(2, java.util.concurrent.TimeUnit.SECONDS)
                     .build();
             camera.getCameraControl().startFocusAndMetering(action);
         } catch (Throwable ignore) {}
